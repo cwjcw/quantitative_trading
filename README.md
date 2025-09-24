@@ -1,34 +1,33 @@
-# Quantitative Trading Research
+# 量化交易研究仓库
 
-This repository collects quantitative trading and stock selection strategies built around the Chinese A-share market. Each strategy lives in its own folder under `strategies/` so ideas stay isolated and reproducible.
+该仓库用于沉淀我在A股市场的量化交易与选股策略。每个策略都放在 `strategies/` 下的独立子目录，并配套自己的 README、数据、笔记与代码，方便快速定位和复用。
 
-## Repository layout
+## 目录结构
 
-- `strategies/` individual strategy workspaces (data, notebooks, code, docs)
-- `scripts/` reusable command line utilities (data sync, batch jobs, etc.)
-- `docs/` shared documentation and research notes
-- `requirements.txt` base Python dependencies for all strategies
+- `strategies/` 各策略的独立工作区（含 `README.md`、`src/`、`data/`、`notebooks/`）
+- `scripts/` 通用脚本与批量任务工具
+- `docs/` 共享研究文档或背景分析
+- `requirements.txt` 全局依赖清单
 
-## Getting started
+## 使用方式
 
-1. Create a virtual environment and install requirements:
+1. 创建虚拟环境并安装依赖：
    ```bash
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
-2. Explore strategy folders for detailed instructions.
-3. Add new strategies by copying the template layout inside `strategies/`.
+2. 进入对应策略目录（如 `strategies/shilei1/`）阅读 README，按照说明运行或调整参数。
+3. 若需要对策略做深入研究，可在该目录的 `notebooks/` 中创建 Jupyter Notebook，或在 `data/` 存储本地缓存数据。
 
-## Strategy index
+## 策略索引
 
-- [`strategies/shilei1/`](strategies/shilei1/): implements the "first wave >100% then deep pullback" screening idea.
+- [`strategies/shilei1/`](strategies/shilei1/): “首波翻倍+深度回撤” 选股逻辑。
 
-## Adding a new strategy
+## 新增策略指引
 
-1. Make a new folder under `strategies/` (snake-case name).
-2. Copy the template structure (`data/`, `notebooks/`, `src/`, `README.md`).
-3. Document the selection logic in the strategy `README.md`.
-4. Keep shared helpers in `scripts/` or a future `quant` Python package to avoid cross-strategy coupling.
+1. 在 `strategies/` 下新建子文件夹（建议使用蛇形命名）。
+2. 拷贝基础结构或参考现有策略，务必补充自己的 `README.md` 来说明策略逻辑、参数与使用步骤。
+3. 共用的工具/脚本请放入 `scripts/` 或未来的共享包中，避免策略之间直接耦合。
 
-Happy researching!
+祝研究顺利！

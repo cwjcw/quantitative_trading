@@ -7,8 +7,14 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+import math
+
 import pandas as pd
+import akshare as ak
 import requests
+from pathlib import Path
+
+from .config import ScreenConfig, get_default_config
 
 SESSION = requests.Session()
 SESSION.trust_env = False
@@ -27,6 +33,8 @@ HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 
 MAX_RESPONSE_PREVIEW = 200
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_EXPORT_FILE = BASE_DIR / "data" / "shilei1.csv"
 
 def _request_json(url: str, params: dict) -> dict:
     """Call Eastmoney endpoint with standard headers and return parsed JSON."""
@@ -52,21 +60,6 @@ def _request_json(url: str, params: dict) -> dict:
 
 
 @dataclass
-class ScreenConfig:
-    """Parameters controlling the pullback screen."""
-
-    history_years: int = 3
-    volatility_window_short: int = 20
-    volatility_window_long: int = 60
-    volatility_ratio_threshold: float = 0.7
-    pullback_threshold: float = 0.3
-    market_cap_floor: float = 1e10  # 100 亿元 (10 billion CNY)
-    price_floor_ratio: float = 0.35
-    trend_days_required: int = 144
-    trend_window: int = 360
-
-
-@dataclass
 class ScreenResult:
     """Holds the evaluation outcome for a single ticker."""
 
@@ -80,30 +73,13 @@ class ScreenResult:
 def _fetch_spot_snapshot() -> pd.DataFrame:
     """Return the latest spot snapshot for all A-share equities."""
 
-    params = {
-        "pn": "1",
-        "pz": "5000",
-        "po": "1",
-        "np": "1",
-        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-        "fltt": "2",
-        "invt": "2",
-        "fid": "f3",
-        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-        "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152",
-    }
-    payload = _request_json(SPOT_URL, params)
-    diff = (payload.get("data") or {}).get("diff") or []
-    if not diff:
-        raise ValueError("行情列表为空")
-
-    spot = pd.DataFrame(diff)
+    spot = ak.stock_zh_a_spot_em()
     spot = spot.rename(
         columns={
-            "f12": "code",
-            "f14": "name",
-            "f2": "close",
-            "f20": "market_cap",
+            "代码": "code",
+            "名称": "name",
+            "最新价": "close",
+            "总市值": "market_cap",
         }
     )
     spot["code"] = spot["code"].astype(str)
@@ -111,6 +87,34 @@ def _fetch_spot_snapshot() -> pd.DataFrame:
     spot["market_cap"] = pd.to_numeric(spot["market_cap"], errors="coerce")
     spot.dropna(subset=["code", "close", "market_cap"], inplace=True)
     return spot[["code", "name", "close", "market_cap"]]
+
+
+def _export_dataframe(df: pd.DataFrame, destination: str | Path, total: int | None = None) -> Path:
+    """Export dataframe to CSV, ensuring parent directories exist."""
+
+    output_path = Path(destination)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_path, index=False)
+    if total is not None:
+        print(f"已导出 {total} 条记录到 {output_path}")
+    else:
+        print(f"已导出 {len(df)} 条记录到 {output_path}")
+    return output_path
+
+
+def list_large_cap_stocks(config: Optional[ScreenConfig] = None) -> pd.DataFrame:
+    """列出满足市值下限且剔除 ST 的股票列表。"""
+
+    config = config or get_default_config()
+    spot = _fetch_spot_snapshot()
+    universe = _filter_base_universe(spot, config)
+    if universe.empty:
+        return universe
+    universe = universe.copy()
+    universe.sort_values("market_cap", ascending=False, inplace=True)
+    universe["market_cap_亿元"] = universe["market_cap"].astype(float) / 1e8
+    universe.reset_index(drop=True, inplace=True)
+    return universe
 
 
 def _filter_base_universe(spot: pd.DataFrame, config: ScreenConfig) -> pd.DataFrame:
@@ -169,60 +173,79 @@ def _fetch_history(code: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     return history
 
 
-def _locate_first_wave(df: pd.DataFrame) -> Optional[dict]:
-    """Find the first instance where price doubles from a prior swing low."""
+def _locate_first_wave(df: pd.DataFrame, config: ScreenConfig) -> Optional[dict]:
+    """Locate the most recent 1st wave (≥100% gain) within the lookback window."""
 
     if df.empty:
         return None
 
-    min_price = df.loc[0, "close"]
-    min_idx = 0
-    first_wave = None
+    cutoff_date = df["date"].iloc[-1] - pd.Timedelta(days=config.first_wave_lookback_days)
+    window_df = df[df["date"] >= cutoff_date].copy()
+    if window_df.empty:
+        window_df = df.copy()
 
-    for idx, close in enumerate(df["close"]):
+    window_df = window_df.dropna(subset=["close", "high"]).copy()
+    if window_df.empty:
+        return None
+
+    window_df.reset_index(inplace=True)
+
+    min_price = math.inf
+    min_idx = int(window_df.loc[0, "index"])
+    candidate: Optional[dict] = None
+
+    for _, row in window_df.iterrows():
+        idx = int(row["index"])
+        close = float(row["close"])
+        if not math.isfinite(close) or close <= 0:
+            continue
         if close < min_price:
             min_price = close
             min_idx = idx
             continue
 
-        gain = (close - min_price) / min_price
-        if gain >= 1.0:
-            window = df.loc[min_idx : idx, "close"]
-            peak_idx = window.idxmax()
-            peak_price = window.max()
-            first_wave = {
+        segment = df.loc[min_idx : idx]
+        peak_idx = int(segment["high"].idxmax())
+        peak_price = float(segment.loc[peak_idx, "high"])
+        start_price = float(df.loc[min_idx, "close"])
+        gain = (peak_price - start_price) / start_price
+
+        if gain >= config.first_wave_gain:
+            candidate = {
                 "start_idx": min_idx,
-                "start_price": float(min_price),
-                "peak_idx": int(peak_idx),
-                "peak_price": float(peak_price),
+                "start_price": start_price,
+                "peak_idx": peak_idx,
+                "peak_price": peak_price,
             }
-            break
 
-    return first_wave
+    return candidate
 
 
-def _check_pullback(df: pd.DataFrame, wave: dict, config: ScreenConfig) -> tuple[bool, Optional[float]]:
+def _check_pullback(df: pd.DataFrame, wave: dict, config: ScreenConfig) -> tuple[bool, Optional[float], Optional[float]]:
     """Verify price retraced the required percentage after the first wave."""
 
     if not wave:
-        return False, None
+        return False, None, None
 
     peak_idx = wave["peak_idx"]
     peak_price = wave["peak_price"]
-    subsequent = df.loc[peak_idx + 1 :, "close"]
+    subsequent = df.iloc[peak_idx + 1 :]
     if subsequent.empty:
-        return False, None
+        return False, None, None
 
-    low_after_peak = subsequent.min()
+    low_after_peak = subsequent["low"].min()
+    if pd.isna(low_after_peak) or peak_price == 0:
+        return False, None, None
+
     pullback = (peak_price - low_after_peak) / peak_price
-    return pullback >= config.pullback_threshold, float(low_after_peak)
+    return pullback >= config.pullback_threshold, float(low_after_peak), float(pullback)
 
 
-def _check_volatility_contraction(df: pd.DataFrame, config: ScreenConfig) -> bool:
+def _check_volatility_contraction(df: pd.DataFrame, config: ScreenConfig) -> tuple[bool, Optional[float]]:
     """Ensure recent realized volatility contracted versus the longer window."""
 
     if len(df) < config.volatility_window_short + config.volatility_window_long:
-        return False
+        return False, None
 
     returns = df["close"].pct_change().dropna()
 
@@ -230,31 +253,38 @@ def _check_volatility_contraction(df: pd.DataFrame, config: ScreenConfig) -> boo
     prior = returns.iloc[-(config.volatility_window_short + config.volatility_window_long) : -config.volatility_window_short]
 
     if prior.empty or recent.empty:
-        return False
+        return False, None
 
     recent_std = recent.std(ddof=0)
     prior_std = prior.std(ddof=0)
 
-    if prior_std == 0:
-        return False
+    if prior_std <= 0 or pd.isna(prior_std) or pd.isna(recent_std):
+        return False, None
 
-    return recent_std < prior_std * config.volatility_ratio_threshold
+    ratio = float(recent_std / prior_std)
+    if not math.isfinite(ratio):
+        return False, None
+
+    return ratio < config.volatility_ratio_threshold, ratio
 
 
-def _check_trend_persistence(df: pd.DataFrame, config: ScreenConfig) -> bool:
+def _check_trend_persistence(df: pd.DataFrame, config: ScreenConfig) -> tuple[bool, Optional[float]]:
     """Count closes above the 30-day moving average within the specified window."""
 
-    if len(df) < config.trend_window:
-        return False
-
     window_df = df.tail(config.trend_window).copy()
+    if len(window_df) < 30:
+        return False, None
+
     window_df["ma30"] = window_df["close"].rolling(window=30).mean()
     window_df.dropna(inplace=True)
     if window_df.empty:
-        return False
+        return False, None
 
-    days_above = (window_df["close"] > window_df["ma30"]).sum()
-    return int(days_above) >= config.trend_days_required
+    days_above = int((window_df["close"] > window_df["ma30"]).sum())
+    ratio_required = config.trend_days_required / config.trend_window
+    required = math.ceil(ratio_required * len(window_df))
+    ratio_actual = days_above / len(window_df) if len(window_df) else 0.0
+    return days_above >= required, ratio_actual
 
 
 def evaluate_ticker(row: pd.Series, start: dt.date, end: dt.date, config: ScreenConfig) -> ScreenResult:
@@ -262,57 +292,122 @@ def evaluate_ticker(row: pd.Series, start: dt.date, end: dt.date, config: Screen
 
     code = row["code"]
     name = row["name"]
+    market_cap = pd.to_numeric(row.get("market_cap"), errors="coerce")
+    spot_close = pd.to_numeric(row.get("close"), errors="coerce")
+
+    metrics: dict[str, object] = {
+        "market_cap": float(market_cap) if pd.notna(market_cap) else None,
+        "market_cap_亿元": float(market_cap) / 1e8 if pd.notna(market_cap) else None,
+        "last_close_spot": float(spot_close) if pd.notna(spot_close) else None,
+        "last_close": None,
+        "as_of": end,
+        "first_wave_gain": None,
+        "first_wave_pass": False,
+        "first_wave_threshold": config.first_wave_gain,
+        "first_wave_start_price": None,
+        "first_wave_peak_price": None,
+        "first_wave_start_date": None,
+        "first_wave_peak_date": None,
+        "pullback_ratio": None,
+        "pullback_pass": False,
+        "pullback_low": None,
+        "pullback_threshold": config.pullback_threshold,
+        "price_floor": None,
+        "price_floor_ratio": None,
+        "price_floor_pass": False,
+        "price_floor_threshold": config.price_floor_ratio,
+        "volatility_ratio": None,
+        "volatility_pass": False,
+        "volatility_threshold": config.volatility_ratio_threshold,
+        "trend_ratio": None,
+        "trend_pass": False,
+        "trend_required_ratio": config.trend_days_required / config.trend_window,
+        "conditions_passed": 0,
+    }
 
     history = _fetch_history(code, start, end)
     if history.empty:
-        return ScreenResult(code, name, False, "无历史数据", {})
+        return ScreenResult(code, name, False, "无历史数据", metrics)
 
-    wave = _locate_first_wave(history)
+    wave = _locate_first_wave(history, config)
     if not wave:
-        return ScreenResult(code, name, False, "未找到第一波上涨", {})
+        return ScreenResult(code, name, False, "未找到第一波上涨", metrics)
 
-    pullback_ok, pullback_low = _check_pullback(history, wave, config)
-    if not pullback_ok:
-        return ScreenResult(code, name, False, "回调幅度不足", {"wave": wave})
+    start_idx = wave["start_idx"]
+    peak_idx = wave["peak_idx"]
+    start_price = wave["start_price"]
+    peak_price = wave["peak_price"]
+
+    metrics["first_wave_start_price"] = start_price
+    metrics["first_wave_peak_price"] = peak_price
+    metrics["first_wave_start_date"] = history.loc[start_idx, "date"].date()
+    metrics["first_wave_peak_date"] = history.loc[peak_idx, "date"].date()
+
+    if start_price > 0:
+        gain = (peak_price - start_price) / start_price
+        metrics["first_wave_gain"] = gain
+        metrics["first_wave_pass"] = gain >= config.first_wave_gain
+    else:
+        metrics["first_wave_gain"] = None
+        metrics["first_wave_pass"] = False
+
+    pullback_pass, pullback_low, pullback_ratio = _check_pullback(history, wave, config)
+    metrics["pullback_pass"] = pullback_pass
+    metrics["pullback_low"] = pullback_low
+    metrics["pullback_ratio"] = pullback_ratio
 
     last_close = float(history["close"].iloc[-1])
-    price_floor = wave["start_price"] * config.price_floor_ratio
-    if last_close < price_floor:
-        return ScreenResult(
-            code,
-            name,
-            False,
-            "当前价格低于起涨价保护线",
-            {"wave": wave, "last_close": last_close, "price_floor": price_floor},
-        )
+    metrics["last_close"] = last_close
+    price_floor = start_price * config.price_floor_ratio
+    metrics["price_floor"] = price_floor
+    if start_price > 0:
+        metrics["price_floor_ratio"] = last_close / start_price
+    price_floor_pass = last_close >= price_floor
+    metrics["price_floor_pass"] = price_floor_pass
 
-    if not _check_volatility_contraction(history, config):
-        return ScreenResult(code, name, False, "波动率未收敛", {"wave": wave})
+    vol_pass, vol_ratio = _check_volatility_contraction(history, config)
+    metrics["volatility_pass"] = vol_pass
+    metrics["volatility_ratio"] = vol_ratio
 
-    if not _check_trend_persistence(history, config):
-        return ScreenResult(code, name, False, "趋势保持不达标", {"wave": wave})
+    trend_pass, trend_ratio = _check_trend_persistence(history, config)
+    metrics["trend_pass"] = trend_pass
+    metrics["trend_ratio"] = trend_ratio
 
-    return ScreenResult(
-        code,
-        name,
-        True,
-        None,
-        {
-            "wave": wave,
-            "pullback_low": pullback_low,
-            "last_close": last_close,
-        },
-    )
+    condition_flags = [
+        bool(metrics["first_wave_pass"]),
+        bool(pullback_pass),
+        bool(price_floor_pass),
+        bool(vol_pass),
+        bool(trend_pass),
+    ]
+    metrics["conditions_passed"] = sum(condition_flags)
+
+    passed = all(condition_flags)
+
+    reason = None
+    if not metrics["first_wave_pass"]:
+        reason = "未找到第一波上涨"
+    elif not pullback_pass:
+        reason = "回调幅度不足"
+    elif not price_floor_pass:
+        reason = "当前价格低于起涨价保护线"
+    elif not vol_pass:
+        reason = "波动率未收敛"
+    elif not trend_pass:
+        reason = "趋势保持不达标"
+
+    return ScreenResult(code, name, passed, reason, metrics)
 
 
 def run_screen(
     symbols: Optional[Iterable[str]] = None,
     as_of: Optional[dt.date] = None,
     config: Optional[ScreenConfig] = None,
+    show_progress: bool = False,
 ) -> list[ScreenResult]:
     """Run the screen for selected symbols or the entire filtered universe."""
 
-    config = config or ScreenConfig()
+    config = config or get_default_config()
     as_of = as_of or dt.date.today()
     start_date = as_of - dt.timedelta(days=365 * config.history_years)
 
@@ -323,7 +418,13 @@ def run_screen(
         base = base[base["code"].isin(set(symbols))]
 
     results: list[ScreenResult] = []
-    for _, row in base.iterrows():
+    iterator = base.iterrows()
+    total = len(base)
+    if show_progress and tqdm is not None:
+        iterator = tqdm(iterator, total=total, desc="评估", unit="只")
+    elif show_progress:
+        print(f"开始评估 {total} 只股票...")
+    for idx, (__, row) in enumerate(iterator):
         try:
             result = evaluate_ticker(row, start_date, as_of, config)
             results.append(result)
@@ -334,9 +435,13 @@ def run_screen(
                     name=row["name"],
                     passed=False,
                     reason=f"发生异常:{exc}",
-                    data_points={},
+                    data_points={"conditions_passed": 0},
                 )
             )
+        if show_progress and tqdm is None and (idx + 1) % 100 == 0:
+            print(f"已评估 {idx + 1}/{total} 只股票", end="")
+    if show_progress and tqdm is None:
+        print(f"评估完成，共 {total} 只股票".ljust(40))
     return results
 
 
@@ -357,11 +462,44 @@ def main() -> None:
     parser.add_argument(
         "--max", type=int, default=None, help="Limit evaluation to the first N tickers of the universe"
     )
+    parser.add_argument(
+        "--list-large-cap",
+        action="store_true",
+        help="仅列出满足市值阈值的股票，不执行完整策略筛选",
+    )
+    parser.add_argument(
+        "--export-csv",
+        nargs="?",
+        const=str(DEFAULT_EXPORT_FILE),
+        help="将结果导出为CSV文件，默认保存到 data/shilei1.csv",
+    )
+    parser.add_argument(
+        "--show-progress",
+        action="store_true",
+        help="显示评估进度（需安装 tqdm 才能显示进度条）",
+    )
     args = parser.parse_args()
+
+    if args.list_large_cap:
+        cfg = get_default_config()
+        universe_all = list_large_cap_stocks(cfg)
+        total = len(universe_all)
+        universe = universe_all.head(args.max) if args.max is not None else universe_all
+        if universe.empty:
+            print(f"当前暂无市值≥{cfg.market_cap_floor / 1e8:.0f}亿元且非ST的股票")
+        else:
+            for _, row in universe.iterrows():
+                print(f"{row['code']} {row['name']} 市值≈{row['market_cap_亿元']:.2f}亿元")
+            if args.max is not None and total > len(universe):
+                print(f"...已截断，仅展示前 {len(universe)} 家")
+            print(f"合计 {total} 家股票市值≥{cfg.market_cap_floor / 1e8:.0f}亿元")
+        if args.export_csv and not universe_all.empty:
+            _export_dataframe(universe_all, args.export_csv, total=total)
+        return
 
     as_of = dt.datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else None
 
-    results = run_screen(args.symbols, as_of=as_of)
+    results = run_screen(args.symbols, as_of=as_of, show_progress=args.show_progress)
 
     if args.max is not None:
         results = results[: args.max]
@@ -373,6 +511,20 @@ def main() -> None:
 
     print("-" * 60)
     print(f"Total evaluated: {len(results)} | Passed: {len(passes)}")
+
+    if args.export_csv:
+        records: list[dict[str, object]] = []
+        for res in results:
+            record = {"code": res.code, "name": res.name, "passed": res.passed, "reason": res.reason}
+            record.update(res.data_points)
+            records.append(record)
+        df = pd.DataFrame(records)
+        if not df.empty:
+            sort_cols = [col for col in ["conditions_passed", "passed"] if col in df.columns]
+            if sort_cols:
+                df.sort_values(sort_cols, ascending=[False] * len(sort_cols), inplace=True)
+            df.reset_index(drop=True, inplace=True)
+        _export_dataframe(df, args.export_csv)
 
 
 if __name__ == "__main__":
