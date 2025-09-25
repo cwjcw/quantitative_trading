@@ -1,63 +1,49 @@
-# First Wave Pullback Screener
+# 首波回撤选股器
 
-This screen searches for stocks that experienced a strong first rally (>100%) within the last ~200 trading days, followed by a deep pullback and subsequent volatility contraction.
+该方案用于寻找经历“首波翻倍—深度回撤—波动收敛”的个股，并输出各项指标与是否通过筛选的结果。所有行情与历史K线均由 AkShare 获取。
 
-## Selection rules
+## 筛选规则
 
-1. **First wave rally**: price doubled (≥100% gain) from a prior swing low within roughly the past 200 trading days, measured using the intraday high to confirm the magnitude.
-2. **Deep pullback**: price retraced ≥30% from the first wave's peak, measured on the post-peak low price to capture intraday capitulation.
-3. **Volatility contraction**: recent 20-day close-to-close volatility is lower than the preceding 60-day volatility window.
-4. **Current price floor**: latest close ≥35% of the first wave starting price (keeps the structure intact).
-5. **Trend persistence**: within the last 360 trading days (or what is available), at least 40% of the closes stayed above the 30-day moving average.
-6. **Stock health filters**: exclude `ST` tickers and any stock with total market cap < 100亿元.
+1. **首波上涨**：在最近约 200 个交易日内，从波段起点到高点的涨幅不低于 100%（使用日内最高价确认）。
+2. **深幅回撤**：高点后最低价距离波峰至少回撤 30%，用于捕捉洗盘阶段。
+3. **波动收敛**：最近 20 个交易日的收盘波动率小于前 60 个交易日的波动率乘以阈值（默认 0.7）。
+4. **价格保护线**：当前收盘价不低于首波起涨价的 35%。
+5. **趋势保持**：在近 360 个交易日（或可用样本）中，至少 40% 的收盘价高于 30 日均线。
+6. **健康过滤**：剔除 ST 股票，并默认要求总市值不低于 100 亿元（可在配置中修改）。
 
-The logic is implemented in `src/screener.py`. Adjust parameters inside the script to fine-tune each rule.
-
-### 参数亮点
-
-- `first_wave_gain=1.0`：默认要求波段涨幅至少翻倍，可根据市场风格调至 0.8~1.2。
-- `first_wave_lookback_days=200`：只在最近约200个交易日内寻找第一波，避免历史噪音。
-- `pullback_threshold=0.3`：回撤阈值使用波段高点后的最低价，更贴近极端洗盘。
-- 30日均线上方占比按 `144/360≈40%` 的比例缩放，即便样本不足 360 天也能评估。
-
-
-## Usage
+## 使用方式
 
 ```bash
 python -m strategies.shilei1.src.screener --help
 # 仅列出市值≥100亿元（可叠加 --max 控制数量）
 python -m strategies.shilei1.src.screener --list-large-cap
-# 运行筛选并导出全量结果至 CSV（默认写入 strategies/shilei1/data/shilei1.csv）
-python -m strategies.shilei1.src.screener --export-csv
-python -m strategies.shilei1.src.screener --export-csv custom.csv
-# 带进度条运行（需安装 tqdm）
-python -m strategies.shilei1.src.screener --show-progress --export-csv
+# 运行筛选并导出全量结果到 CSV（默认写入 strategies/shilei1/data/shilei1.csv）
+python -m strategies.shilei1.src.screener --show-progress --workers 10 --export-csv
+python -m strategies.shilei1.src.screener --export-csv my_result.csv
 ```
 
-默认运行时使用 AkShare 获取最新 A 股行情快照，并通过东方财富 REST 接口抓取复权历史K线数据。
+程序默认会下载所有 A 股（含北交所）行情数据，并在本地根据上述规则完成评估。导出的 CSV 包含每个条件的数值、是否合格，以及通过条件计数，按通过数量降序排列便于查看。
 
-## Folder guide
+## 目录结构
 
-- `data/` place cached raw data pulled from 东方财富或其他公开数据源。
-- `notebooks/` exploratory analysis or backtesting notebooks.
-- `src/` reusable screening code and helpers.
+- `data/` AkShare 抓取的缓存数据或筛选结果，可在此查看 `shilei1.csv`。
+- `notebooks/` Jupyter Notebook，便于做回测或参数敏感度分析。
+- `src/` 主要代码，`screener.py` 提供命令行入口与核心逻辑，`config.py` 集中管理参数。
 
-## 调整参数
+## 参数与扩展
 
-- 所有可调节参数集中在 `strategies/shilei1/src/config.py`，直接修改 `ScreenConfig` 中的字段即可，例如将 `first_wave_gain` 调至 `0.8` 用于捕捉稍弱的第一波。
-- 可使用 `python -m strategies.shilei1.src.screener --list-large-cap` 快速查看市值≥100亿元的股票名单。
-- 支持 `--export-csv` 将所有筛选指标导出到 CSV（默认写入 `strategies/shilei1/data/shilei1.csv`），也可指定自定义文件名，导出内容按通过条件数量降序排序。
-- 使用 `--show-progress` 可在筛选过程中显示进度（如安装 tqdm 会显示进度条）。
-- 如果需要临时实验，可在运行脚本时加载自定义配置：
+- 所有可调参数归档在 `strategies/shilei1/src/config.py`，例如可将 `first_wave_gain` 调整为 `0.8` 捕捉弱势首波，或将 `market_cap_floor` 调成 `5e9` 放宽市值限制。
+- `--workers` 控制并行线程数（默认 4），在本地网络带宽允许的情况下可提高到 8~12 以加速筛选。
+- 举例：
   ```python
   from strategies.shilei1.src import config, screener
-  my_cfg = config.ScreenConfig(first_wave_gain=0.8)
-  results = screener.run_screen(config=my_cfg)
+  cfg = config.ScreenConfig(first_wave_gain=0.8, market_cap_floor=5e9)
+  results = screener.run_screen(config=cfg, workers=8, show_progress=True)
   ```
-- 若想外部化（YAML/JSON），可在 `config.py` 中新增解析函数并在 `screener.py` 调用。
+- 如需外部化参数可扩展 `config.py` 读取 JSON/YAML，再在 `screener.py` 中加载。
 
-## Next steps
+## 下一步建议
 
-- Backtest the screen to validate hit rates across sectors.
-- Add factor exposures or risk controls as optional post-filters.
-- Wrap the screener in a scheduled job under `scripts/` once parameters are stable.
+- 对入选股票做回测，评估不同市场环境下的命中率与收益表现。
+- 在 `notebooks/` 中结合行业、基本面或因子数据，构建进一步的过滤或排序逻辑。
+- 将脚本纳入定时任务或 CI，定期输出最新候选名单。

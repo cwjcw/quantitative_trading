@@ -1,4 +1,4 @@
-"""Screen for first-wave pullback opportunities using Eastmoney data."""
+"""Screen for first-wave pullback opportunities using AkShare data sources."""
 
 from __future__ import annotations
 
@@ -8,56 +8,43 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 import math
+import os
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import akshare as ak
-import requests
 from pathlib import Path
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 from .config import ScreenConfig, get_default_config
 
-SESSION = requests.Session()
-SESSION.trust_env = False
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://quote.eastmoney.com/",
-    "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-}
-
-SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
-HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-
-MAX_RESPONSE_PREVIEW = 200
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_EXPORT_FILE = BASE_DIR / "data" / "shilei1.csv"
 
-def _request_json(url: str, params: dict) -> dict:
-    """Call Eastmoney endpoint with standard headers and return parsed JSON."""
+from contextlib import contextmanager
 
-    response = SESSION.get(
-        url,
-        params=params,
-        headers=HEADERS,
-        proxies=None,
-        timeout=10,
-    )
-    response.raise_for_status()
-    if not response.encoding:
-        response.encoding = 'utf-8'
-    text = response.text.strip()
-    if not text:
-        raise ValueError(f'{url} 接口返回空响应')
+
+@contextmanager
+def _temporarily_disable_proxy():
+    keys = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]
+    backups = {k: os.environ.get(k) for k in keys}
+    for k in keys:
+        if k in os.environ:
+            del os.environ[k]
     try:
-        return response.json()
-    except ValueError as exc:
-        snippet = text[:MAX_RESPONSE_PREVIEW]
-        raise ValueError(f'{url} 接口返回非 JSON 数据: {snippet}') from exc
-
+        yield
+    finally:
+        for k, v in backups.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 @dataclass
 class ScreenResult:
@@ -71,9 +58,13 @@ class ScreenResult:
 
 
 def _fetch_spot_snapshot() -> pd.DataFrame:
-    """Return the latest spot snapshot for all A-share equities."""
+    """Return the latest spot snapshot for all A-share equities via AkShare."""
 
-    spot = ak.stock_zh_a_spot_em()
+    with _temporarily_disable_proxy():
+        spot_main = ak.stock_zh_a_spot_em()
+        spot_bj = ak.stock_bj_a_spot_em()
+
+    spot = pd.concat([spot_main, spot_bj], ignore_index=True, sort=False)
     spot = spot.rename(
         columns={
             "代码": "code",
@@ -128,45 +119,37 @@ def _filter_base_universe(spot: pd.DataFrame, config: ScreenConfig) -> pd.DataFr
 
 
 def _fetch_history(code: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """Download daily price history via the Eastmoney REST API."""
+    """Download daily price history via AkShare."""
 
-    market_prefix = "1" if code.startswith(("5", "6", "9")) else "0"
-    secid = f"{market_prefix}.{code}"
-    params = {
-        "secid": secid,
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": "101",
-        "fqt": "1",
-        "beg": start.strftime("%Y%m%d"),
-        "end": end.strftime("%Y%m%d"),
+    start_str = start.strftime("%Y%m%d")
+    end_str = end.strftime("%Y%m%d")
+
+    with _temporarily_disable_proxy():
+        if code.startswith(("4", "8")):
+            history = ak.stock_bj_a_hist(symbol=code, start_date=start_str, end_date=end_str, adjust="qfq")
+        else:
+            history = ak.stock_zh_a_hist(symbol=code, start_date=start_str, end_date=end_str, adjust="qfq")
+
+    if history is None or history.empty:
+        return pd.DataFrame()
+
+    rename_map = {
+        "日期": "date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume",
     }
-    payload = _request_json(HISTORY_URL, params)
-    klines = (payload.get("data") or {}).get("klines") or []
+    history = history.rename(columns=rename_map)
+    if "date" not in history:
+        return pd.DataFrame()
 
-    records = []
-    for item in klines:
-        parts = item.split(",")
-        if len(parts) < 6:
-            continue
-        records.append(
-            {
-                "date": parts[0],
-                "open": parts[1],
-                "close": parts[2],
-                "high": parts[3],
-                "low": parts[4],
-                "volume": parts[5],
-            }
-        )
-
-    history = pd.DataFrame(records)
-    if history.empty:
-        return history
-
-    history["date"] = pd.to_datetime(history["date"])
+    history["date"] = pd.to_datetime(history["date"], errors="coerce")
+    history.dropna(subset=["date"], inplace=True)
     for column in ["open", "close", "high", "low", "volume"]:
-        history[column] = pd.to_numeric(history[column], errors="coerce")
+        if column in history:
+            history[column] = pd.to_numeric(history[column], errors="coerce")
     history.dropna(subset=["close"], inplace=True)
     history.sort_values("date", inplace=True)
     history.reset_index(drop=True, inplace=True)
@@ -404,6 +387,7 @@ def run_screen(
     as_of: Optional[dt.date] = None,
     config: Optional[ScreenConfig] = None,
     show_progress: bool = False,
+    workers: int = 1,
 ) -> list[ScreenResult]:
     """Run the screen for selected symbols or the entire filtered universe."""
 
@@ -417,32 +401,67 @@ def run_screen(
     if symbols:
         base = base[base["code"].isin(set(symbols))]
 
-    results: list[ScreenResult] = []
-    iterator = base.iterrows()
+    base = base.reset_index(drop=True)
+
     total = len(base)
-    if show_progress and tqdm is not None:
-        iterator = tqdm(iterator, total=total, desc="评估", unit="只")
-    elif show_progress:
-        print(f"开始评估 {total} 只股票...")
-    for idx, (__, row) in enumerate(iterator):
+    if total == 0:
+        return []
+
+    rows = [(idx, row.copy()) for idx, row in base.iterrows()]
+    workers = max(1, int(workers))
+
+    def _task(data: tuple[int, pd.Series]) -> tuple[int, ScreenResult]:
+        idx, row = data
         try:
             result = evaluate_ticker(row, start_date, as_of, config)
-            results.append(result)
         except Exception as exc:  # noqa: BLE001
-            results.append(
-                ScreenResult(
-                    code=row["code"],
-                    name=row["name"],
-                    passed=False,
-                    reason=f"发生异常:{exc}",
-                    data_points={"conditions_passed": 0},
-                )
+            result = ScreenResult(
+                code=row["code"],
+                name=row["name"],
+                passed=False,
+                reason=f"发生异常:{exc}",
+                data_points={"conditions_passed": 0},
             )
-        if show_progress and tqdm is None and (idx + 1) % 100 == 0:
-            print(f"已评估 {idx + 1}/{total} 只股票", end="")
-    if show_progress and tqdm is None:
-        print(f"评估完成，共 {total} 只股票".ljust(40))
-    return results
+        return idx, result
+
+    results: list[Optional[ScreenResult]] = [None] * total
+
+    if workers == 1:
+        iterator = rows
+        if show_progress and tqdm is not None:
+            iterator = tqdm(iterator, total=total, desc="评估", unit="只")
+        elif show_progress:
+            print(f"开始评估 {total} 只股票...")
+        for idx, row in iterator:
+            pos, result = _task((idx, row))
+            results[pos] = result
+            if show_progress and tqdm is None and (pos + 1) % 100 == 0:
+                print(f"已评估 {pos + 1}/{total} 只股票")
+        if show_progress and tqdm is None:
+            print(f"评估完成，共 {total} 只股票".ljust(40))
+    else:
+        progress = None
+        if show_progress and tqdm is not None:
+            progress = tqdm(total=total, desc="评估", unit="只")
+        elif show_progress:
+            print(f"开始评估 {total} 只股票...")
+        completed = 0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_task, item) for item in rows]
+            for future in as_completed(futures):
+                pos, result = future.result()
+                results[pos] = result
+                completed += 1
+                if progress is not None:
+                    progress.update(1)
+                elif show_progress and completed % 100 == 0:
+                    print(f"已评估 {completed}/{total} 只股票")
+        if progress is not None:
+            progress.close()
+        elif show_progress:
+            print(f"评估完成，共 {total} 只股票".ljust(40))
+
+    return [res for res in results if res is not None]
 
 
 def _format_result(result: ScreenResult) -> str:
@@ -478,6 +497,12 @@ def main() -> None:
         action="store_true",
         help="显示评估进度（需安装 tqdm 才能显示进度条）",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="并行评估的线程数，默认为 4",
+    )
     args = parser.parse_args()
 
     if args.list_large_cap:
@@ -499,7 +524,9 @@ def main() -> None:
 
     as_of = dt.datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else None
 
-    results = run_screen(args.symbols, as_of=as_of, show_progress=args.show_progress)
+    results = run_screen(
+        args.symbols, as_of=as_of, show_progress=args.show_progress, workers=args.workers
+    )
 
     if args.max is not None:
         results = results[: args.max]
