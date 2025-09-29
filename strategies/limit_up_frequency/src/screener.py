@@ -10,10 +10,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, TypeVar
+from urllib.parse import quote_plus
 
 import pandas as pd
 import time
 import requests
+
+try:
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import Engine
+    from sqlalchemy.exc import SQLAlchemyError
+except ImportError:  # pragma: no cover
+    create_engine = None  # type: ignore[assignment]
+    Engine = Any  # type: ignore[assignment]
+    SQLAlchemyError = Exception  # type: ignore[assignment]
 
 from .config import LimitUpConfig, get_default_config
 
@@ -27,20 +37,14 @@ try:
 except ImportError:  # pragma: no cover
     tqdm = None
 
-try:
-    import pymysql
-    from pymysql import OperationalError
-except ImportError:  # pragma: no cover
-    pymysql = None
-    OperationalError = Exception  # type: ignore
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_EXPORT_FILE = BASE_DIR / "data" / "limit_up_frequency.csv"
+DEFAULT_EXPORT_FILE = BASE_DIR / "data" / "limit_up_frequency.xlsx"
 
 _ORIGINAL_REQUESTS_GET = requests.get
 _REQUEST_HEADERS: dict[str, str] = {}
 _REQUESTS_PATCHED = False
+_MYSQL_ENGINES: dict[str, Engine] = {}
 
 
 def _apply_requests_header_patch(headers: dict[str, str]) -> None:
@@ -195,6 +199,19 @@ class LimitUpResult:
     latest_main_flow: Optional[float] = None
 
 
+COLUMN_LABELS = {
+    "code": "股票代码",
+    "name": "股票名称",
+    "limit_up_count": "涨停次数",
+    "max_consecutive": "连续涨停天数",
+    "limit_up_dates": "涨停日期列表",
+    "last_close": "最新收盘价",
+    "last_trade_date": "最后交易日",
+    "limit_threshold": "涨停阈值",
+    "latest_main_flow": "主力净流入-净额",
+}
+
+
 def _fetch_with_retry(label: str, func: Callable[[], T], config: LimitUpConfig) -> T:
     attempts = max(1, config.fetch_retry_attempts)
     delay = max(0.5, config.fetch_retry_delay)
@@ -219,19 +236,25 @@ def _quote_identifier(identifier: str) -> str:
     return "`" + identifier.replace("`", "``") + "`"
 
 
-def _open_mysql_connection(config: LimitUpConfig):
-    if pymysql is None:
-        raise SystemExit("请先安装 pymysql: pip install pymysql")
-    return pymysql.connect(
-        host=config.mysql_host,
-        port=config.mysql_port,
-        user=config.mysql_user,
-        password=config.mysql_password,
-        database=config.mysql_database,
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
+def _build_mysql_uri(config: LimitUpConfig) -> str:
+    user = quote_plus(config.mysql_user or "")
+    password = quote_plus(config.mysql_password or "")
+    auth = f"{user}:{password}@" if password or user else ""
+    return (
+        f"mysql+pymysql://{auth}{config.mysql_host}:{config.mysql_port}/"
+        f"{config.mysql_database}?charset=utf8mb4"
     )
+
+
+def _get_mysql_engine(config: LimitUpConfig) -> Engine:
+    if create_engine is None:
+        raise SystemExit("请先安装 SQLAlchemy: pip install SQLAlchemy")
+    uri = _build_mysql_uri(config)
+    engine = _MYSQL_ENGINES.get(uri)
+    if engine is None:
+        engine = create_engine(uri, pool_pre_ping=True, pool_recycle=3600)
+        _MYSQL_ENGINES[uri] = engine
+    return engine
 
 
 def _fetch_mysql_universe(config: LimitUpConfig) -> pd.DataFrame:
@@ -240,13 +263,10 @@ def _fetch_mysql_universe(config: LimitUpConfig) -> pd.DataFrame:
         select_parts.append(f"{_quote_identifier(config.mysql_name_column)} AS name")
     query = f"SELECT {', '.join(select_parts)} FROM {_quote_identifier(config.mysql_table)}"
 
-    connection = _open_mysql_connection(config)
     try:
-        universe = pd.read_sql(query, connection)
-    except OperationalError as exc:  # pragma: no cover - depends on DB
+        universe = pd.read_sql(query, _get_mysql_engine(config))
+    except SQLAlchemyError as exc:  # pragma: no cover - depends on DB
         raise RuntimeError(f"获取股票列表失败：{exc}") from exc
-    finally:
-        connection.close()
 
     if universe.empty:
         return universe
@@ -280,13 +300,10 @@ def _fetch_history_mysql(code: str, config: LimitUpConfig) -> pd.DataFrame:
         f"ORDER BY {_quote_identifier(config.mysql_date_column)} DESC LIMIT %s"
     )
 
-    connection = _open_mysql_connection(config)
     try:
-        df = pd.read_sql(query, connection, params=(code, limit))
-    except OperationalError as exc:  # pragma: no cover - depends on DB
+        df = pd.read_sql(query, _get_mysql_engine(config), params=(code, limit))
+    except SQLAlchemyError as exc:  # pragma: no cover - depends on DB
         raise RuntimeError(f"查询 {code} 历史数据失败：{exc}") from exc
-    finally:
-        connection.close()
 
     if df.empty:
         return df
@@ -296,7 +313,7 @@ def _fetch_history_mysql(code: str, config: LimitUpConfig) -> pd.DataFrame:
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce") * config.mysql_change_multiplier
+    df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce")
     if config.mysql_flow_column and "main_flow" in df:
         df["main_flow"] = pd.to_numeric(df["main_flow"], errors="coerce")
     if config.mysql_close_column and "close" in df:
@@ -491,19 +508,7 @@ def run_screen(
 
 def _results_to_dataframe(results: list[LimitUpResult]) -> pd.DataFrame:
     if not results:
-        return pd.DataFrame(
-            columns=[
-                "code",
-                "name",
-                "limit_up_count",
-                "max_consecutive",
-                "limit_up_dates",
-                "last_close",
-                "last_trade_date",
-                "limit_threshold",
-                "latest_main_flow",
-            ]
-        )
+        return pd.DataFrame(columns=list(COLUMN_LABELS.values()))
     data = [
         {
             "code": r.code,
@@ -521,13 +526,18 @@ def _results_to_dataframe(results: list[LimitUpResult]) -> pd.DataFrame:
     df = pd.DataFrame(data)
     df.sort_values(["limit_up_count", "max_consecutive", "code"], ascending=[False, True, True], inplace=True)
     df.reset_index(drop=True, inplace=True)
+    df = df[list(COLUMN_LABELS.keys())]
+    df.rename(columns=COLUMN_LABELS, inplace=True)
     return df
 
 
 def _export_dataframe(df: pd.DataFrame, destination: str | Path) -> Path:
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
+    try:
+        df.to_excel(path, index=False)
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit("请先安装 openpyxl: pip install openpyxl") from exc
     print(f"已导出 {len(df)} 条记录到 {path}")
     return path
 
@@ -555,7 +565,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-stocks", type=int, default=None, help="只测前 N 只股票，调试时使用")
     parser.add_argument("--workers", type=int, default=None, help="并发线程数，默认使用配置值")
     parser.add_argument("--show-progress", action="store_true", help="显示 tqdm 进度条")
-    parser.add_argument("--export-csv", default=None, help="导出筛选结果 CSV 的路径，不传则仅打印摘要")
+    parser.add_argument("--export-xlsx", default=None, help="导出筛选结果 Excel 文件的路径，不传则默认写入 data 目录")
     parser.add_argument("--use-mysql", action="store_true", help="从 MySQL 而非 AkShare 获取行情")
     parser.add_argument("--mysql-host", default=None, help="MySQL 主机地址")
     parser.add_argument("--mysql-port", type=int, default=None, help="MySQL 端口")
@@ -569,7 +579,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mysql-flow-column", default=None, help="主力净流入列名")
     parser.add_argument("--mysql-name-column", default=None, help="股票名称列名，如无可留空")
     parser.add_argument("--mysql-close-column", default=None, help="收盘价列名，可选")
-    parser.add_argument("--mysql-change-multiplier", type=float, default=None, help="涨跌幅列需要乘以的系数，默认 100")
     parser.add_argument("--proxy-api-url", default=None, help="快代理提取 API 地址，配置后每次执行都会申请新 IP")
     parser.add_argument(
         "--proxy-api-param",
@@ -639,8 +648,6 @@ def main() -> None:
         overrides["mysql_name_column"] = args.mysql_name_column
     if args.mysql_close_column is not None:
         overrides["mysql_close_column"] = args.mysql_close_column
-    if args.mysql_change_multiplier is not None:
-        overrides["mysql_change_multiplier"] = args.mysql_change_multiplier
     if args.proxy_api_url is not None:
         overrides["proxy_api_url"] = args.proxy_api_url
     if args.proxy_api_param:
@@ -669,8 +676,8 @@ def main() -> None:
         print("未找到符合条件的股票")
     else:
         print(df.head(20).to_string(index=False))
-    if args.export_csv:
-        _export_dataframe(df, args.export_csv)
+    if args.export_xlsx:
+        _export_dataframe(df, args.export_xlsx)
     elif not df.empty:
         _export_dataframe(df, DEFAULT_EXPORT_FILE)
 

@@ -96,11 +96,10 @@ class LimitUpConfig:
     mysql_table: str = "fund_flow_daily"  # 行情所在表名
     mysql_code_column: str = "代码"  # 股票代码列名
     mysql_date_column: str = "日期"  # 交易日期列名
-    mysql_change_column: str = "涨跌幅"  # 涨跌幅列名（小数）
+    mysql_change_column: str = "涨跌幅"  # 涨跌幅列名（小数，如 0.1 表示 10%）
     mysql_flow_column: Optional[str] = "主力净流入-净额"  # 主力净流入列名
     mysql_name_column: Optional[str] = "名称"  # 股票名称列名
     mysql_close_column: Optional[str] = None  # 收盘价列名
-    mysql_change_multiplier: float = 100.0  # 涨跌幅换算倍数（小数转百分比）
 
 
 def get_default_config() -> LimitUpConfig:

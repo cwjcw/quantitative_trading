@@ -1,6 +1,6 @@
 # 限涨筛选器
 
-该策略用于在最近 20 个交易日内寻找出现多次涨停但未出现 3 连板的个股，结果默认导出到 `strategies/limit_up_frequency/data/limit_up_frequency.csv`。
+该策略用于在最近 20 个交易日内寻找出现多次涨停但未出现 3 连板的个股，结果默认导出到 `strategies/limit_up_frequency/data/limit_up_frequency.xlsx`。
 
 ## 筛选逻辑
 
@@ -16,11 +16,11 @@
 # 查看参数
 python -m strategies.limit_up_frequency.src.screener --help
 
-# 执行筛选并显示结果，默认也会写入 CSV
+# 执行筛选并显示结果，默认也会写入 Excel
 python -m strategies.limit_up_frequency.src.screener --show-progress --workers 12
 
-# 指定自定义导出路径
-python -m strategies.limit_up_frequency.src.screener --export-csv /tmp/limitup.csv
+# 指定自定义导出路径（Excel）
+python -m strategies.limit_up_frequency.src.screener --export-xlsx /tmp/limitup.xlsx
 ```
 
 > 提示：如需在无网络代理环境中运行，可直接使用默认参数；脚本会自动暂时关闭系统代理设置以避免连接被劫持。
@@ -59,8 +59,9 @@ python -m strategies.limit_up_frequency.src.screener --export-csv /tmp/limitup.c
   mysql_date_column = "日期"
   mysql_change_column = "涨跌幅"
   mysql_flow_column = "主力净流入-净额"
-  mysql_change_multiplier = 100.0  # 若涨跌幅以小数存储
   ```
+  需要安装 `pymysql`、`SQLAlchemy` 与 `openpyxl`：`pip install pymysql SQLAlchemy openpyxl`。
+  其中 `涨跌幅` 字段应直接存储为小数（例如 0.1 表示 10%）。
   建议把账号密码放在项目根目录的 `.env` 文件中，例如：
   ```INI
   MYSQL_USER=cwjcw
@@ -72,5 +73,5 @@ python -m strategies.limit_up_frequency.src.screener --export-csv /tmp/limitup.c
   python -m strategies.limit_up_frequency.src.screener \
     --use-mysql --mysql-host 127.0.0.1 --mysql-user cwjcw --mysql-password bj210726 \
     --mysql-database mystock --mysql-table fund_flow_daily --mysql-change-column 涨跌幅 \
-    --mysql-change-multiplier 100 --show-progress
+    --show-progress
   ```

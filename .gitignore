@@ -12,3 +12,5 @@ cache/
 *.tmp
 venv/
 *.csv
+*.xlsx
+*.xls
