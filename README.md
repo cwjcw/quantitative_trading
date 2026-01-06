@@ -14,7 +14,7 @@
 1. 创建虚拟环境并安装依赖：
    ```bash
    python -m venv .venv
-   source .venv/bin/activate
+   source venv/bin/activate
    pip install -r requirements.txt
    ```
 2. 进入对应策略目录（如 `strategies/shilei1/`）阅读 README，按照说明运行或调整参数。
