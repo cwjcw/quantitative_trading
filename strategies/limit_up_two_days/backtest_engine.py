@@ -183,8 +183,9 @@ class BacktestEngine:
                     # 跳过该买入信号
                     continue
 
-                # 使用第三天开盘价作为买入价格
-                entry_price = open_price
+                # 使用第三天收盘价作为买入价格
+                close_price = next_row.iloc[0]['close']
+                entry_price = close_price
                 if next_trading_date not in all_buy_signals:
                     all_buy_signals[next_trading_date] = []
                 all_buy_signals[next_trading_date].append({
