@@ -7,3 +7,4 @@ tqdm>=4.65.0
 PyQt5>=5.15.0
 APScheduler>=3.10.4
 streamlit>=1.31.0
+tushare>=1.4.0

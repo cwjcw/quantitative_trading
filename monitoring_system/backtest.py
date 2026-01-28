@@ -8,6 +8,7 @@ import pandas as pd
 import sqlite3
 import akshare as ak
 
+from db import init_db
 from indicators import bollinger_bands, rsi, vwap
 from utils import get_symbols_and_market, load_config
 
@@ -27,6 +28,7 @@ class Trade:
     shares: int
     cash: float
     fee: float
+    reason: str
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -315,7 +317,24 @@ def backtest_portfolio(
                 sell_shares = positions[symbol]
                 fee = _apply_fee(price, sell_shares, commission_rate, stamp_rate, stamp_on_sell)
                 cash += price * sell_shares * LOT_SIZE - fee
-                trades.append(Trade(symbol, name_map.get(symbol, symbol), "SELL", row["datetime"], price, sell_shares, cash, fee))
+                sell_reason = "signal"
+                if take_profit:
+                    sell_reason = "take_profit"
+                if stop_loss:
+                    sell_reason = "stop_loss"
+                trades.append(
+                    Trade(
+                        symbol,
+                        name_map.get(symbol, symbol),
+                        "SELL",
+                        row["datetime"],
+                        price,
+                        sell_shares,
+                        cash,
+                        fee,
+                        sell_reason,
+                    )
+                )
                 positions[symbol] = 0
 
                 left = sell_shares
@@ -397,7 +416,19 @@ def backtest_portfolio(
                 positions[symbol] += shares
                 last_buy_date[symbol] = date_key
                 open_lots[symbol].append({"price": price, "shares": shares, "fee": fee})
-                trades.append(Trade(symbol, name_map.get(symbol, symbol), "BUY_ADD", row["datetime"], price, shares, cash, fee))
+                trades.append(
+                    Trade(
+                        symbol,
+                        name_map.get(symbol, symbol),
+                        "BUY_ADD",
+                        row["datetime"],
+                        price,
+                        shares,
+                        cash,
+                        fee,
+                        "",
+                    )
+                )
                 continue
             if buy_signal and (not limit_up or price < limit_up):
                 prio = int(priority_map.get(symbol, 1))
@@ -420,7 +451,19 @@ def backtest_portfolio(
             positions[symbol] = shares
             last_buy_date[symbol] = date_key
             open_lots[symbol].append({"price": price, "shares": shares, "fee": fee})
-            trades.append(Trade(symbol, name_map.get(symbol, symbol), "BUY", dt_str, price, shares, cash, fee))
+            trades.append(
+                Trade(
+                    symbol,
+                    name_map.get(symbol, symbol),
+                    "BUY",
+                    dt_str,
+                    price,
+                    shares,
+                    cash,
+                    fee,
+                    "",
+                )
+            )
 
         equity = cash
         for symbol in symbols:
@@ -443,7 +486,19 @@ def backtest_portfolio(
         price = float(row["close"])
         fee = _apply_fee(price, positions[symbol], commission_rate, stamp_rate, stamp_on_sell)
         cash += price * positions[symbol] * LOT_SIZE - fee
-        trades.append(Trade(symbol, name_map.get(symbol, symbol), "SELL_FORCE", row["datetime"], price, positions[symbol], cash, fee))
+        trades.append(
+            Trade(
+                symbol,
+                name_map.get(symbol, symbol),
+                "SELL_FORCE",
+                row["datetime"],
+                price,
+                positions[symbol],
+                cash,
+                fee,
+                "force",
+            )
+        )
         positions[symbol] = 0
         open_lots[symbol].clear()
 
@@ -575,7 +630,16 @@ def _build_pnl_summary(trades: List[Trade], start_day: str, last_day: str) -> pd
             }
         ]
     )
-    metrics_df = pd.concat([metrics_df, total_row], ignore_index=True)
+    if metrics_df.empty:
+        return total_row
+    total_dict = total_row.iloc[0].to_dict()
+    for key, value in total_dict.items():
+        if value is None:
+            total_dict[key] = pd.NA
+    metrics_df = metrics_df.reset_index(drop=True)
+    metrics_df = metrics_df.reindex(range(len(metrics_df) + 1))
+    for key, value in total_dict.items():
+        metrics_df.at[len(metrics_df) - 1, key] = value
     return metrics_df
 
 
@@ -658,6 +722,7 @@ def _build_empty_summary(symbol: str, start_day: str, last_day: str) -> pd.DataF
 
 
 def run_portfolio_backtest() -> None:
+    init_db()
     symbols, _ = get_symbols_and_market()
     params = _load_strategy_params()
     mode = params.get("market_mode", "range")
@@ -706,6 +771,7 @@ def run_portfolio_backtest() -> None:
 
 
 def run_single_full_backtest() -> None:
+    init_db()
     symbols, _ = get_symbols_and_market()
     single_rows = []
     for symbol in symbols:

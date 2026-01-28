@@ -19,12 +19,13 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss.replace(0, pd.NA)
     rsi_val = 100 - (100 / (1 + rs))
-    return rsi_val.fillna(0)
+    rsi_val = pd.to_numeric(rsi_val, errors="coerce")
+    return rsi_val.fillna(0.0)
 
 
 def vwap(df: pd.DataFrame) -> pd.Series:
     if df.empty or "amount" not in df.columns or "volume" not in df.columns:
         return pd.Series([], dtype=float)
     volume = df["volume"].replace(0, pd.NA) * 100
-    vwap_val = (df["amount"].cumsum() / volume.cumsum()).fillna(method="ffill")
+    vwap_val = (df["amount"].cumsum() / volume.cumsum()).ffill()
     return vwap_val

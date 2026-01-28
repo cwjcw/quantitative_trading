@@ -51,7 +51,7 @@
     "add_position_ratio": 0.5
   },
   "history_params": {
-    "minute_start_date": "2025-11-28",
+    "minute_start_date": "2025-12-01",
     "minute_end_date": "2026-01-14",
     "minute_period": "5"
   },
@@ -139,13 +139,14 @@
       "vwap_cross_k": 1,
       "buy_rsi_threshold": 35,
       "sell_rsi_threshold": 75,
-      "sell_require_min": 3,
+      "sell_require_min": 2,
       "vwap_dev_sell": 0.02,
       "volume_mult": 1.2,
       "trend_rsi_threshold": 50,
       "trend_use_mid": true,
       "trend_use_vwap": true,
-      "trend_require_up": true
+      "trend_require_up": true,
+      "stop_loss_pct": 0.04
     },
     "bear": {
       "band_tol": 0.003,
