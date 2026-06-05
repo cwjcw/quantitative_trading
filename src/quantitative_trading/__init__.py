@@ -1,0 +1,2 @@
+"""Quantitative trading research toolkit."""
+
