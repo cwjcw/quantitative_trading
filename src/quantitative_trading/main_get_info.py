@@ -18,6 +18,7 @@ STAGES: dict[str, dict[str, object]] = {
     "core_daily": {
         "priorities": {"P0"},
         "endpoints": {
+            "daily",
             "daily_basic",
             "moneyflow",
             "moneyflow_ths",
@@ -168,6 +169,17 @@ def run_financials(
     sleep_seconds: float,
     retry_failed: bool,
 ) -> None:
+    requested_mode = mode
+    if mode == "auto":
+        if end_date.weekday() == 6:
+            mode = "all"
+        else:
+            print(
+                "MAIN_GET_INFO financial_mode=auto "
+                f"weekday={end_date.strftime('%A')} skip, financials run on Sunday"
+            )
+            return
+
     if mode == "none":
         print("MAIN_GET_INFO financial_mode=none skip")
         return
@@ -183,7 +195,7 @@ def run_financials(
 
     print(
         "MAIN_GET_INFO "
-        f"financial_mode={mode} codes={len(codes)} "
+        f"financial_mode={requested_mode} resolved_mode={mode} codes={len(codes)} "
         f"start={yyyymmdd(start_date)} end={yyyymmdd(end_date)}"
     )
     collect_financials(
@@ -221,11 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-sleep-seconds", type=float, default=0.05, help="Sleep between raw API calls.")
     parser.add_argument(
         "--financial-mode",
-        choices=["none", "recent", "all"],
-        default="recent",
-        help="recent uses recent announcement-related stock codes; all refetches every local stock code.",
+        choices=["auto", "none", "recent", "all"],
+        default="auto",
+        help="auto runs all local stock financials only when end date is Sunday; recent uses announcement-related codes; all uses every local stock code.",
     )
-    parser.add_argument("--financial-max-codes", type=int, default=500, help="Limit financial stock codes. Use 0 for no limit.")
+    parser.add_argument("--financial-max-codes", type=int, default=0, help="Limit financial stock codes. Use 0 for no limit.")
     parser.add_argument("--financial-sleep-seconds", type=float, default=0.2, help="Sleep between financial API calls.")
     parser.add_argument("--retry-failed", action="store_true", help="Retry failed financial checkpoints.")
     parser.add_argument("--skip-views", action="store_true", help="Do not refresh analytics views.")

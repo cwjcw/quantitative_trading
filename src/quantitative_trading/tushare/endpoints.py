@@ -16,6 +16,7 @@ class TushareEndpoint:
 
 
 ENDPOINTS: tuple[TushareEndpoint, ...] = (
+    TushareEndpoint("daily", "P0", "trade_date", "trade_date"),
     TushareEndpoint("daily_basic", "P0", "trade_date", "trade_date"),
     TushareEndpoint("moneyflow", "P0", "trade_date", "trade_date"),
     TushareEndpoint("moneyflow_ths", "P0", "trade_date", "trade_date"),

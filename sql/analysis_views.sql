@@ -1,5 +1,22 @@
 CREATE SCHEMA IF NOT EXISTS analytics;
 
+CREATE OR REPLACE VIEW analytics.tushare_daily_price AS
+SELECT
+    raw->>'ts_code' AS ts_code,
+    to_date(raw->>'trade_date', 'YYYYMMDD') AS trade_date,
+    NULLIF(raw->>'open', '')::numeric AS open,
+    NULLIF(raw->>'high', '')::numeric AS high,
+    NULLIF(raw->>'low', '')::numeric AS low,
+    NULLIF(raw->>'close', '')::numeric AS close,
+    NULLIF(raw->>'pre_close', '')::numeric AS pre_close,
+    NULLIF(raw->>'change', '')::numeric AS change,
+    NULLIF(raw->>'pct_chg', '')::numeric AS pct_chg,
+    NULLIF(raw->>'vol', '')::numeric AS vol,
+    NULLIF(raw->>'amount', '')::numeric AS amount,
+    fetched_at
+FROM tushare_raw_records
+WHERE endpoint = 'daily';
+
 CREATE OR REPLACE VIEW analytics.tushare_daily_basic AS
 SELECT
     raw->>'ts_code' AS ts_code,
@@ -104,10 +121,21 @@ WHERE endpoint IN (
 )
   AND date_key ~ '^[0-9]{8}$';
 
+DROP VIEW IF EXISTS analytics.tushare_stock_feature_daily;
+
 CREATE OR REPLACE VIEW analytics.tushare_stock_feature_daily AS
 SELECT
-    COALESCE(db.ts_code, mf.ts_code, cyq.ts_code) AS ts_code,
-    COALESCE(db.trade_date, mf.trade_date, cyq.trade_date) AS trade_date,
+    COALESCE(price.ts_code, db.ts_code, mf.ts_code, cyq.ts_code) AS ts_code,
+    COALESCE(price.trade_date, db.trade_date, mf.trade_date, cyq.trade_date) AS trade_date,
+    price.open,
+    price.high,
+    price.low,
+    price.close,
+    price.pre_close,
+    price.change,
+    price.pct_chg,
+    price.vol,
+    price.amount,
     db.turnover_rate,
     db.turnover_rate_f,
     db.volume_ratio,
@@ -120,12 +148,15 @@ SELECT
     cyq.winner_rate,
     cyq.cost_50pct,
     cyq.weight_avg
-FROM analytics.tushare_daily_basic db
+FROM analytics.tushare_daily_price price
+FULL OUTER JOIN analytics.tushare_daily_basic db
+    ON price.ts_code = db.ts_code AND price.trade_date = db.trade_date
 FULL OUTER JOIN analytics.tushare_moneyflow_stock mf
-    ON db.ts_code = mf.ts_code AND db.trade_date = mf.trade_date
+    ON COALESCE(price.ts_code, db.ts_code) = mf.ts_code
+   AND COALESCE(price.trade_date, db.trade_date) = mf.trade_date
 FULL OUTER JOIN analytics.tushare_cyq_perf cyq
-    ON COALESCE(db.ts_code, mf.ts_code) = cyq.ts_code
-   AND COALESCE(db.trade_date, mf.trade_date) = cyq.trade_date;
+    ON COALESCE(price.ts_code, db.ts_code, mf.ts_code) = cyq.ts_code
+   AND COALESCE(price.trade_date, db.trade_date, mf.trade_date) = cyq.trade_date;
 
 CREATE OR REPLACE VIEW analytics.tushare_fina_indicator AS
 SELECT

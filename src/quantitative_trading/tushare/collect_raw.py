@@ -484,7 +484,7 @@ def collect(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect non-price Tushare raw data into PostgreSQL.")
+    parser = argparse.ArgumentParser(description="Collect Tushare raw data into PostgreSQL.")
     parser.add_argument("--start-date", required=True, help="Start date in YYYYMMDD format.")
     parser.add_argument("--end-date", required=True, help="End date in YYYYMMDD format.")
     parser.add_argument(

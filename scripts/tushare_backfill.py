@@ -12,6 +12,7 @@ STAGES: dict[str, dict[str, object]] = {
     "core_daily": {
         "priorities": {"P0"},
         "endpoints": {
+            "daily",
             "daily_basic",
             "moneyflow",
             "moneyflow_ths",
