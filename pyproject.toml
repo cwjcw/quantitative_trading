@@ -13,6 +13,7 @@ dependencies = [
 qt-tushare-raw = "quantitative_trading.tushare.collect_raw:main"
 qt-tushare-financials = "quantitative_trading.tushare.collect_financials:main"
 qt-apply-analysis-views = "quantitative_trading.analysis.apply_views:main"
+main_get_info = "quantitative_trading.main_get_info:main"
 
 [build-system]
 requires = ["hatchling"]

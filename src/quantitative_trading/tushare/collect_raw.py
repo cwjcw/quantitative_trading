@@ -221,10 +221,10 @@ def insert_rows(
     endpoint: TushareEndpoint,
     frame: pd.DataFrame,
     run_date: date,
+    replace_ts_code: str | None = None,
+    replace_start_date: date | None = None,
+    replace_end_date: date | None = None,
 ) -> int:
-    if frame.empty:
-        return 0
-
     fetched_at = datetime.now(UTC)
     rows = []
     for _, row in frame.iterrows():
@@ -243,7 +243,8 @@ def insert_rows(
             }
         )
 
-    stmt = text(
+    delete_stmt, delete_params = latest_slice_delete(endpoint, rows, run_date, replace_ts_code, replace_start_date, replace_end_date)
+    insert_stmt = text(
         """
         INSERT INTO tushare_raw_records (
             endpoint, date_key, date_type, ts_code, content_type,
@@ -254,12 +255,79 @@ def insert_rows(
             :row_hash, :fetched_at, CAST(:raw AS jsonb)
         )
         ON CONFLICT (endpoint, date_key, ts_code, content_type, row_hash)
-        DO NOTHING
+        DO UPDATE SET
+            date_type = EXCLUDED.date_type,
+            fetched_at = EXCLUDED.fetched_at,
+            raw = EXCLUDED.raw
         """
     )
     with engine.begin() as conn:
-        result = conn.execute(stmt, rows)
+        conn.execute(delete_stmt, delete_params)
+        if not rows:
+            return 0
+        result = conn.execute(insert_stmt, rows)
     return int(result.rowcount or 0)
+
+
+def latest_slice_delete(
+    endpoint: TushareEndpoint,
+    rows: list[dict[str, Any]],
+    run_date: date,
+    replace_ts_code: str | None,
+    replace_start_date: date | None,
+    replace_end_date: date | None,
+) -> tuple[Any, dict[str, Any]]:
+    base_params: dict[str, Any] = {
+        "endpoint": endpoint.name,
+        "content_type": endpoint.content_type,
+    }
+
+    if replace_ts_code and replace_start_date and replace_end_date:
+        return (
+            text(
+                """
+                DELETE FROM tushare_raw_records
+                WHERE endpoint = :endpoint
+                  AND content_type = :content_type
+                  AND ts_code = :ts_code
+                  AND date_key BETWEEN :start_key AND :end_key
+                """
+            ),
+            {
+                **base_params,
+                "ts_code": replace_ts_code,
+                "start_key": to_tushare_date(replace_start_date),
+                "end_key": to_tushare_date(replace_end_date),
+            },
+        )
+
+    if endpoint.date_param is None:
+        return (
+            text(
+                """
+                DELETE FROM tushare_raw_records
+                WHERE endpoint = :endpoint
+                  AND content_type = :content_type
+                """
+            ),
+            base_params,
+        )
+
+    date_keys = sorted({row["date_key"] for row in rows if row["date_key"]})
+    if not date_keys:
+        date_keys = [run_date.strftime("%Y%m") if endpoint.date_param == "month" else to_tushare_date(run_date)]
+
+    return (
+        text(
+            """
+            DELETE FROM tushare_raw_records
+            WHERE endpoint = :endpoint
+              AND content_type = :content_type
+              AND date_key = ANY(:date_keys)
+            """
+        ),
+        {**base_params, "date_keys": date_keys},
+    )
 
 
 def start_run(engine: Engine, endpoints: list[TushareEndpoint], dates: list[date]) -> uuid.UUID:

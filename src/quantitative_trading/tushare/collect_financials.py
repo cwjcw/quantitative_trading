@@ -264,7 +264,15 @@ def collect_financials(
 
             try:
                 frame = fetch_financial_endpoint(pro, endpoint, ts_code, start_date, end_date)
-                inserted = insert_rows(engine, endpoint, frame, end_date)
+                inserted = insert_rows(
+                    engine,
+                    endpoint,
+                    frame,
+                    end_date,
+                    replace_ts_code=ts_code,
+                    replace_start_date=start_date,
+                    replace_end_date=end_date,
+                )
                 inserted_total += inserted
                 update_checkpoint(engine, endpoint, ts_code, start_date, end_date, "success", inserted)
                 print(f"{endpoint.name} {ts_code}: fetched={len(frame)} inserted={inserted}")
