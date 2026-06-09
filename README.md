@@ -180,9 +180,7 @@ DB_PASSWORD=your_password
 | --- | --- |
 | `stock_5m_bars` | 标准 5 分钟线，后续策略和研究优先读取 |
 | `stock_snapshots` | 实时快照 |
-| `snapshot_runs` | 快照采集运行记录 |
 | `stock_instruments` | 股票基础 / 合约信息 |
-| `five_min_bars` | 旧表 / 遗留表，不建议新项目使用 |
 
 建议读取 5 分钟线：
 
@@ -201,18 +199,7 @@ FROM stock_snapshots
 ORDER BY captured_at DESC, stock_code;
 ```
 
-### 已有 Tushare 资金流表
-
-历史上已经存在：
-
-| 表 | 说明 |
-| --- | --- |
-| `tushare_moneyflow_runs` | 资金流采集运行记录 |
-| `tushare_moneyflow_records` | 资金流原始记录，原始字段在 `raw jsonb` |
-
-这两张表可以继续保留，但新采集器统一写入 `tushare_raw_records`。
-
-### 新增 Tushare 原始层
+### Tushare 原始层
 
 #### `tushare_raw_runs`
 

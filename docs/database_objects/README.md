@@ -20,13 +20,9 @@
 | `analytics` | [tushare_sector_moneyflow_dc](analytics.tushare_sector_moneyflow_dc.md) | `VIEW` | 东方财富行业/概念板块资金流视图，支持板块轮动和强势板块筛选。 |
 | `analytics` | [tushare_stock_events](analytics.tushare_stock_events.md) | `VIEW` | 股票事件统一视图，整合 ST、停复牌、解禁、质押、股东变动、回购、公告、研报等事件。 |
 | `analytics` | [tushare_stock_feature_daily](analytics.tushare_stock_feature_daily.md) | `VIEW` | 个股日频特征宽表，整合日线价格、估值、资金流和筹码指标，供选股模型直接使用。 |
-| `public` | [five_min_bars](public.five_min_bars.md) | `BASE TABLE` | 历史遗留 5 分钟 K 线表；新研究优先使用 stock_5m_bars。 |
-| `public` | [snapshot_runs](public.snapshot_runs.md) | `BASE TABLE` | 实时快照采集运行记录，用于追踪每轮快照任务。 |
 | `public` | [stock_5m_bars](public.stock_5m_bars.md) | `BASE TABLE` | QMT 标准 5 分钟行情表，保存股票分钟级 OHLCV，是日内特征和回测的核心行情源。 |
 | `public` | [stock_instruments](public.stock_instruments.md) | `BASE TABLE` | 本地股票合约/基础信息表，是本地可交易股票池的重要来源。 |
 | `public` | [stock_snapshots](public.stock_snapshots.md) | `BASE TABLE` | QMT 实时快照表，保存采集时点的盘口/价格/成交等实时状态。 |
 | `public` | [tushare_collection_checkpoints](public.tushare_collection_checkpoints.md) | `BASE TABLE` | 逐股或长任务采集 checkpoint 表，用于断点续跑、跳过已完成任务和记录失败原因。 |
-| `public` | [tushare_moneyflow_records](public.tushare_moneyflow_records.md) | `BASE TABLE` | 旧版 Tushare 资金流原始记录，后续统一优先使用 tushare_raw_records。 |
-| `public` | [tushare_moneyflow_runs](public.tushare_moneyflow_runs.md) | `BASE TABLE` | 旧版 Tushare 资金流采集运行记录，保留作历史兼容。 |
 | `public` | [tushare_raw_records](public.tushare_raw_records.md) | `BASE TABLE` | 新版 Tushare 原始数据统一表，保存接口原始 JSON；当前按切片替换，保留最新版数据。 |
 | `public` | [tushare_raw_runs](public.tushare_raw_runs.md) | `BASE TABLE` | 新版 Tushare 通用采集运行记录，记录每次抓取的接口、区间、行数、耗时和错误数。 |

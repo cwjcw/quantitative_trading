@@ -39,8 +39,6 @@ Tushare 接口
 | `public.tushare_raw_runs` | 每次 Tushare 抓取运行记录 | 查任务是否成功、耗时、错误数和抓取区间。 |
 | `public.tushare_collection_checkpoints` | 逐股财报等长任务 checkpoint | 财报全市场任务断点续跑、跳过已完成接口。 |
 
-旧表 `public.tushare_moneyflow_runs`、`public.tushare_moneyflow_records` 是早期资金流采集遗留表，后续研究优先使用 `tushare_raw_records` 和 `analytics.tushare_moneyflow_stock`。
-
 ## 主要分析视图
 
 | 视图 | 内容 | 用途 |
@@ -131,4 +129,3 @@ uv run main_get_info --lookback-days 7
 - 数据架构规划：[tushare_data_architecture.md](tushare_data_architecture.md)
 - 回填报告：[tushare_backfill_report.md](tushare_backfill_report.md)
 - 逐对象说明：[database_objects/README.md](database_objects/README.md)
-
