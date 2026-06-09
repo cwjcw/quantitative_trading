@@ -4,8 +4,8 @@ A 股量化交易研究仓库。当前项目以 PostgreSQL 为中心，把本地
 
 本项目现在的核心思路是：
 
-- QMT 负责交易行情数据，尤其是 5 分钟线、实时快照和股票合约信息。
-- Tushare 负责非交易类、交易决策强相关的外生数据，例如资金流、每日指标、筹码分布、涨跌停、龙虎榜、融资融券、沪深股通、板块概念、公告研报、风险事件和基本面。
+- QMT 负责标准 5 分钟 K 线和股票合约信息。
+- Tushare 负责实时快照，以及非交易类、交易决策强相关的外生数据，例如资金流、每日指标、筹码分布、涨跌停、龙虎榜、融资融券、沪深股通、板块概念、公告研报、风险事件和基本面。
 - 所有 Tushare 数据先进入通用原始层，完整保留 `raw jsonb`，再按研究需求映射到 `analytics` schema 下的分析视图。
 - 采集任务必须可重跑、可去重、可补采、可追踪失败原因。
 
@@ -24,6 +24,10 @@ A 股量化交易研究仓库。当前项目以 PostgreSQL 为中心，把本地
 - 新增逐股财报采集器：
   - `qt-tushare-financials`
   - `scripts/tushare_financial_backfill.py`
+- 新增 Tushare 实时快照采集器：
+  - `scripts/tushare_stock_snapshots.py`
+  - 默认全市场每 5 分钟写入 `public.stock_snapshots`
+  - 默认 `09:10` 开始、`11:35-12:59` 暂停、`15:05` 抓最后一轮后自动退出
 - 新增分析视图：
   - `analytics.tushare_daily_basic`
   - `analytics.tushare_moneyflow_stock`
@@ -172,14 +176,14 @@ DB_PASSWORD=your_password
 
 ## 数据库分层
 
-### QMT 行情层
+### 行情层
 
-这些表由 QMT 或已有本地流程维护，Tushare 不重复采集行情 K 线：
+`stock_5m_bars` 由 QMT 或已有本地流程维护；`stock_snapshots` 当前由 Tushare 实时快照脚本维护：
 
 | 表 | 说明 |
 | --- | --- |
 | `stock_5m_bars` | 标准 5 分钟线，后续策略和研究优先读取 |
-| `stock_snapshots` | 实时快照 |
+| `stock_snapshots` | Tushare 实时快照，保存全市场盘中价格、盘口、成交量、成交额和派生指标 |
 | `stock_instruments` | 股票基础 / 合约信息 |
 
 建议读取 5 分钟线：
@@ -194,10 +198,64 @@ ORDER BY stock_code, bar_time;
 建议读取实时快照：
 
 ```sql
-SELECT *
+SELECT DISTINCT ON (stock_code)
+    stock_code,
+    instrument_name,
+    captured_at,
+    to_timestamp(raw_time / 1000.0) AT TIME ZONE 'Asia/Shanghai' AS quote_time,
+    last_price,
+    change_percent,
+    avg_price,
+    turnover_rate_float,
+    market_phase
 FROM stock_snapshots
-ORDER BY captured_at DESC, stock_code;
+ORDER BY stock_code, raw_time DESC NULLS LAST, captured_at DESC;
 ```
+
+#### Tushare 实时快照
+
+实时快照采集脚本是独立入口：
+
+```bash
+python scripts/tushare_stock_snapshots.py --loop --all-stock
+```
+
+推荐由 N8N 每个交易日 `09:00` 左右启动，脚本会自己等到 `09:10` 开始采集：
+
+```bash
+cd /data/automation/code/personal/quantitative_trading && .venv/bin/python -u scripts/tushare_stock_snapshots.py --loop --all-stock --batch-size 800 --interval 300 --start-at 09:10 --pause-start 11:35 --pause-end 12:59 --end-at 15:05 >> logs/tushare_stock_snapshots_$(date +%F).log 2>&1
+```
+
+默认行为：
+
+- `09:10` 开始抓取。
+- 每 `300` 秒抓取一次。
+- `11:35-12:59` 之间暂停抓取，`13:00` 自动恢复。
+- `15:05` 后会再抓一轮收盘结果，然后自动退出，不需要单独配置关闭工作流。
+- 每次脚本启动时，会删除历史日期中行情时间 `09:40` 之后的旧快照，保留历史日期早盘基准快照。
+- 单轮全市场约 `5527` 只股票，耗时约 `4-5` 秒。
+
+字段口径：
+
+- `captured_at` 是本机采集时间。
+- `raw_time` 是 Tushare 行情时间，盘中判断应优先使用它。
+- `raw->>'TIME'` 是 Tushare 原始行情时间字符串。
+- `pvolume` 是成交股数，`volume` 是换算后的手数。
+- `avg_price` 由 `amount / pvolume` 计算。
+- `change_percent` 由 `last_price / last_close - 1` 计算。
+- `turnover_rate_float` 和 `turnover_rate_total` 使用最近一期 `analytics.tushare_daily_basic` 的流通股本/总股本计算。
+- `up_stop_price` 和 `down_stop_price` 暂留空，避免不同板块、ST 规则和价格最小变动单位导致误算。
+
+`market_phase` 按行情时间划分：
+
+| 阶段 | 时间 |
+| --- | --- |
+| `集合竞价` | `09:15-09:25` |
+| `盘中` | `09:30-11:30`、`13:00-14:57` |
+| `午间休市` | `11:30-13:00` |
+| `收盘集合竞价` | `14:57-15:00` |
+| `收盘` | `15:00` 后 |
+| `盘前` | 其他盘前时间 |
 
 ### Tushare 原始层
 
