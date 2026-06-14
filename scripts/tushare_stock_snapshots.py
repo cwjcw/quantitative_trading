@@ -19,6 +19,8 @@ from quantitative_trading.db import make_engine
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_CODES = "300806.SZ,002938.SZ"
+DEFAULT_CLEANUP_HISTORY_DAYS = 7
+DEFAULT_CLEANUP_HISTORY_AFTER = "10:00"
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,8 +38,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pause-end", default="12:59", help="Local pause end HH:MM for loop mode.")
     parser.add_argument(
         "--cleanup-history-after",
-        default="09:40",
-        help="On startup, delete snapshots from dates before today whose quote time is after HH:MM. Empty disables cleanup.",
+        default=DEFAULT_CLEANUP_HISTORY_AFTER,
+        help="On startup, delete old snapshots whose quote time is after HH:MM. Empty disables cleanup.",
+    )
+    parser.add_argument(
+        "--cleanup-history-days",
+        type=int,
+        default=DEFAULT_CLEANUP_HISTORY_DAYS,
+        help="Keep snapshots from this many recent calendar days before applying startup cleanup.",
     )
     return parser.parse_args()
 
@@ -329,23 +337,26 @@ def parse_local_time(value: str) -> dt_time:
     return dt_time(int(hour), int(minute), tzinfo=LOCAL_TZ)
 
 
-def cleanup_history_snapshots(engine, cleanup_after: str) -> int:
+def cleanup_history_snapshots(engine, cleanup_after: str, keep_days: int) -> int:
     if not cleanup_after:
         return 0
+    if keep_days < 0:
+        raise ValueError("--cleanup-history-days must be greater than or equal to 0.")
     cutoff = parse_local_time(cleanup_after)
     today = datetime.now(LOCAL_TZ).date()
+    before_date = today - timedelta(days=keep_days)
     query = text(
         """
         delete from public.stock_snapshots
-        where trade_date < :today
+        where trade_date < :before_date
           and raw_time is not null
           and (to_timestamp(raw_time / 1000.0) at time zone 'Asia/Shanghai')::time > :cutoff
         """
     )
     with engine.begin() as conn:
-        result = conn.execute(query, {"today": today, "cutoff": cutoff.replace(tzinfo=None)})
+        result = conn.execute(query, {"before_date": before_date, "cutoff": cutoff.replace(tzinfo=None)})
     deleted = result.rowcount or 0
-    print(f"startup cleanup deleted={deleted} before_date={today} after_time={cleanup_after}")
+    print(f"startup cleanup deleted={deleted} before_date={before_date} after_time={cleanup_after}")
     return deleted
 
 
@@ -428,10 +439,11 @@ def main() -> None:
     if not is_trading_day(settings.tushare_token):
         return
     engine = make_engine(settings.database_url)
+    if args.loop:
+        cleanup_history_snapshots(engine, args.cleanup_history_after, args.cleanup_history_days)
     codes = load_codes(args.all_stock, args.codes, settings.tushare_token)
     print(f"loaded {len(codes)} codes")
     if args.loop:
-        cleanup_history_snapshots(engine, args.cleanup_history_after)
         run_loop(
             engine,
             codes,
