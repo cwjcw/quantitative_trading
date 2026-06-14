@@ -140,6 +140,42 @@ def load_codes(all_stock: bool, codes: str, token: str) -> list[str]:
     return frame["ts_code"].dropna().astype(str).sort_values().tolist()
 
 
+def to_tushare_date(value) -> str:
+    return value.strftime("%Y%m%d")
+
+
+def is_trading_day(token: str) -> bool:
+    today = datetime.now(LOCAL_TZ).date()
+    trade_date = to_tushare_date(today)
+    pro = ts.pro_api(token)
+    try:
+        frame = pro.query(
+            "trade_cal",
+            exchange="SSE",
+            start_date=trade_date,
+            end_date=trade_date,
+            fields="cal_date,is_open",
+        )
+    except Exception as exc:
+        print(f"WARN trade_cal check failed for {trade_date}, continuing collection: {exc}")
+        return True
+
+    if frame is None or frame.empty or "is_open" not in frame.columns:
+        print(f"WARN trade_cal returned no usable row for {trade_date}, continuing collection.")
+        return True
+
+    row = frame.iloc[0]
+    is_open = str(row.get("is_open", "")).strip()
+    if is_open == "1":
+        return True
+    if is_open == "0":
+        print(f"{datetime.now(LOCAL_TZ).isoformat(timespec='seconds')} {trade_date} is not a trading day, exiting.")
+        return False
+
+    print(f"WARN trade_cal returned unexpected is_open={is_open!r} for {trade_date}, continuing collection.")
+    return True
+
+
 def chunks(values: list[str], size: int):
     for start in range(0, len(values), size):
         yield values[start : start + size]
@@ -389,6 +425,8 @@ def run_loop(
 def main() -> None:
     args = parse_args()
     settings = get_settings()
+    if not is_trading_day(settings.tushare_token):
+        return
     engine = make_engine(settings.database_url)
     codes = load_codes(args.all_stock, args.codes, settings.tushare_token)
     print(f"loaded {len(codes)} codes")

@@ -228,6 +228,7 @@ cd /data/automation/code/personal/quantitative_trading && .venv/bin/python -u sc
 
 默认行为：
 
+- 启动时先检查当天是否为上交所交易日；如果不是交易日，会打印日志并直接退出，不采集实时行情。
 - `09:10` 开始抓取。
 - 每 `300` 秒抓取一次。
 - `11:35-12:59` 之间暂停抓取，`13:00` 自动恢复。
