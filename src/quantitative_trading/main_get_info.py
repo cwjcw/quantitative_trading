@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
+import sys
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import tushare as ts
@@ -218,6 +222,83 @@ def apply_analysis_views() -> None:
     apply_views_main()
 
 
+def fund_process_running() -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", "scripts/tushare_fund_backfill.py"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return False
+    current_pid = str(os.getpid())
+    for line in result.stdout.splitlines():
+        if "pgrep -af" in line:
+            continue
+        if current_pid not in line and "tushare_fund_backfill.py" in line:
+            return True
+    return False
+
+
+def run_fund_collection(
+    mode: str,
+    start_date: date,
+    end_date: date,
+    sleep_seconds: float,
+    max_codes: int | None,
+    background: bool,
+    resume: bool,
+    log_path: str | None,
+) -> None:
+    if mode == "none":
+        print("MAIN_GET_INFO fund_mode=none skip")
+        return
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = repo_root / "scripts" / "tushare_fund_backfill.py"
+    if not script_path.exists():
+        raise RuntimeError(f"Fund backfill script not found: {script_path}")
+
+    command = [sys.executable, "-u", str(script_path)]
+    if mode in {"metadata", "all"}:
+        command.append("--metadata")
+    if mode in {"nav", "all"}:
+        command.extend(["--nav", "--start-date", yyyymmdd(start_date), "--end-date", yyyymmdd(end_date)])
+        if max_codes is not None:
+            command.extend(["--max-codes", str(max_codes)])
+        if not resume:
+            command.append("--no-resume")
+    command.extend(["--sleep-seconds", str(sleep_seconds)])
+
+    if background:
+        if fund_process_running():
+            print("MAIN_GET_INFO fund background skip: existing tushare_fund_backfill.py process is running")
+            return
+        resolved_log_path = Path(log_path) if log_path else repo_root / "logs" / f"tushare_fund_{end_date:%Y-%m-%d}.log"
+        if not resolved_log_path.is_absolute():
+            resolved_log_path = repo_root / resolved_log_path
+        resolved_log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = resolved_log_path.open("a", encoding="utf-8")
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        print(
+            "MAIN_GET_INFO "
+            f"fund_mode={mode} background pid={process.pid} log={resolved_log_path} "
+            f"start={yyyymmdd(start_date)} end={yyyymmdd(end_date)}"
+        )
+        return
+
+    print(f"MAIN_GET_INFO fund_mode={mode} start={yyyymmdd(start_date)} end={yyyymmdd(end_date)}")
+    subprocess.run(command, cwd=repo_root, check=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
     parser = argparse.ArgumentParser(description="Daily unified data collection entrypoint for n8n.")
@@ -241,6 +322,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--financial-sleep-seconds", type=float, default=0.2, help="Sleep between financial API calls.")
     parser.add_argument("--retry-failed", action="store_true", help="Retry failed financial checkpoints.")
     parser.add_argument("--skip-views", action="store_true", help="Do not refresh analytics views.")
+    parser.add_argument(
+        "--fund-mode",
+        choices=["none", "metadata", "nav", "all"],
+        default="none",
+        help="Optional Tushare fund collection. Use all for metadata plus fund_nav.",
+    )
+    parser.add_argument(
+        "--fund-background",
+        action="store_true",
+        help="Start fund collection in the background so n8n is not blocked by long fund_nav runs.",
+    )
+    parser.add_argument("--fund-start-date", default=None, help="Fund start date in YYYYMMDD. Default: main start date.")
+    parser.add_argument("--fund-end-date", default=None, help="Fund end date in YYYYMMDD. Default: main end date.")
+    parser.add_argument("--fund-sleep-seconds", type=float, default=0.02, help="Sleep between fund API calls.")
+    parser.add_argument("--fund-max-codes", type=int, default=0, help="Limit fund codes for nav collection. Use 0 for no limit.")
+    parser.add_argument(
+        "--fund-resume",
+        action="store_true",
+        help="For fund_nav, skip funds that already have any nav records. Useful for initial long backfills; omit for daily refresh.",
+    )
+    parser.add_argument("--fund-log-path", default=None, help="Background fund log path. Default: logs/tushare_fund_YYYY-MM-DD.log.")
     return parser
 
 
@@ -265,6 +367,21 @@ def main() -> None:
     )
     if not args.skip_views:
         apply_analysis_views()
+    fund_start_date = parse_yyyymmdd(args.fund_start_date) if args.fund_start_date else start_date
+    fund_end_date = parse_yyyymmdd(args.fund_end_date) if args.fund_end_date else end_date
+    if fund_start_date > fund_end_date:
+        raise ValueError("fund start date must be <= fund end date")
+    fund_max_codes = None if args.fund_max_codes == 0 else args.fund_max_codes
+    run_fund_collection(
+        mode=args.fund_mode,
+        start_date=fund_start_date,
+        end_date=fund_end_date,
+        sleep_seconds=args.fund_sleep_seconds,
+        max_codes=fund_max_codes,
+        background=args.fund_background,
+        resume=args.fund_resume,
+        log_path=args.fund_log_path,
+    )
     print(f"MAIN_GET_INFO done start={yyyymmdd(start_date)} end={yyyymmdd(end_date)}")
 
 

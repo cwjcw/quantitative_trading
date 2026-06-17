@@ -24,5 +24,14 @@
 | `public` | [stock_instruments](public.stock_instruments.md) | `BASE TABLE` | 本地股票合约/基础信息表，是本地可交易股票池的重要来源。 |
 | `public` | [stock_snapshots](public.stock_snapshots.md) | `BASE TABLE` | QMT 实时快照表，保存采集时点的盘口/价格/成交等实时状态。 |
 | `public` | [tushare_collection_checkpoints](public.tushare_collection_checkpoints.md) | `BASE TABLE` | 逐股或长任务采集 checkpoint 表，用于断点续跑、跳过已完成任务和记录失败原因。 |
+| `public` | [tushare_fund_basic](public.tushare_fund_basic.md) | `BASE TABLE` | 基金基础信息表，包含开放式基金和场内基金。 |
+| `public` | [tushare_fund_company](public.tushare_fund_company.md) | `BASE TABLE` | 基金公司、资管和投资管理机构信息表。 |
+| `public` | [tushare_fund_daily](public.tushare_fund_daily.md) | `BASE TABLE` | 场内基金日行情表，包含开高低收、涨跌幅、成交量和成交额。 |
+| `public` | [tushare_fund_div](public.tushare_fund_div.md) | `BASE TABLE` | 基金分红表，包含登记日、除息日、派息日和分红金额等。 |
+| `public` | [tushare_fund_manager](public.tushare_fund_manager.md) | `BASE TABLE` | 基金经理任职和履历表。 |
+| `public` | [tushare_fund_nav](public.tushare_fund_nav.md) | `BASE TABLE` | 基金净值表，包含单位净值、累计净值和复权净值。 |
+| `public` | [tushare_fund_portfolio](public.tushare_fund_portfolio.md) | `BASE TABLE` | 基金持仓表，包含重仓股票、市值和持仓比例。 |
+| `public` | [tushare_fund_records](public.tushare_fund_records.md) | `BASE TABLE` | Tushare 基金接口原始 JSON 统一表。 |
+| `public` | [tushare_fund_share](public.tushare_fund_share.md) | `BASE TABLE` | 基金份额表，用于分析基金规模和份额变化。 |
 | `public` | [tushare_raw_records](public.tushare_raw_records.md) | `BASE TABLE` | 新版 Tushare 原始数据统一表，保存接口原始 JSON；当前按切片替换，保留最新版数据。 |
 | `public` | [tushare_raw_runs](public.tushare_raw_runs.md) | `BASE TABLE` | 新版 Tushare 通用采集运行记录，记录每次抓取的接口、区间、行数、耗时和错误数。 |
