@@ -28,6 +28,12 @@ A 股量化交易研究仓库。当前项目以 PostgreSQL 为中心，把本地
   - `scripts/tushare_stock_snapshots.py`
   - 默认全市场每 5 分钟写入 `public.stock_snapshots`
   - 默认 `09:10` 开始、`11:35-12:59` 暂停、`15:05` 抓最后一轮后自动退出
+- 新增盘中实时资金流快照采集器：
+  - `scripts/realtime_moneyflow_snapshots.py`
+  - 默认每 10 分钟抓取东方财富全市场个股、行业、概念资金流
+  - 自动判断交易日，默认 `09:30` 开始、`11:35-12:59` 暂停、`15:05` 结束
+  - 写入 `public.realtime_moneyflow_runs`、`public.realtime_moneyflow_snapshots`
+  - 提供 `analytics.realtime_moneyflow_latest`、`analytics.realtime_sector_moneyflow_latest`、`analytics.realtime_dc_member_moneyflow_latest`
 - 新增分析视图：
   - `analytics.tushare_daily_basic`
   - `analytics.tushare_moneyflow_stock`
@@ -129,6 +135,7 @@ uv run qt-apply-analysis-views
 dependencies = [
     "pandas>=2.2.0",
     "psycopg[binary]>=3.2.0",
+    "requests>=2.31.0",
     "sqlalchemy>=2.0.0",
     "tushare>=1.4.0",
 ]
@@ -257,6 +264,91 @@ cd /data/automation/code/personal/quantitative_trading && .venv/bin/python -u sc
 | `收盘集合竞价` | `14:57-15:00` |
 | `收盘` | `15:00` 后 |
 | `盘前` | 其他盘前时间 |
+
+#### 实时资金流快照
+
+实时资金流快照采集脚本是独立入口：
+
+```bash
+python scripts/realtime_moneyflow_snapshots.py --loop
+```
+
+默认行为：
+
+- 启动时先用 Tushare `trade_cal` 判断当天是否为上交所交易日；如果不是交易日，会打印日志并直接退出。
+- 数据源为东方财富实时资金流接口，Tushare 日频资金流仍由 `main_get_info` 在收盘后补齐和校验。
+- 默认抓取 `stock,industry,concept` 三个维度：
+  - `stock`：全市场个股资金流。
+  - `industry`：行业 / 细分行业板块资金流。
+  - `concept`：概念 / 题材板块资金流。
+- 可选增加 `region` 地域板块资金流。
+- `09:30` 开始抓取。
+- 每 `600` 秒抓取一次。
+- `11:35-12:59` 之间暂停抓取，`13:00` 自动恢复。
+- `15:05` 后自动退出。
+- 循环模式下单轮接口失败只记录日志和运行状态，不退出进程，下一轮继续尝试。
+
+写入对象：
+
+| 对象 | 说明 |
+| --- | --- |
+| `public.realtime_moneyflow_runs` | 每轮采集运行记录、状态、耗时、错误信息 |
+| `public.realtime_moneyflow_snapshots` | 实时资金流标准窄表，保留完整 `raw jsonb` |
+| `analytics.realtime_moneyflow_latest` | 每个维度 / 代码的最新一条实时资金流 |
+| `analytics.realtime_sector_moneyflow_latest` | 最新行业、概念、地域板块资金流 |
+| `analytics.realtime_dc_member_moneyflow_latest` | 基于 `dc_member` 成分股向上汇总的板块 / 概念资金流 |
+
+资金字段口径：
+
+| 字段 | 含义 |
+| --- | --- |
+| `main_net_amount` | 主力净流入额，金额单位为元 |
+| `main_net_rate` | 主力净占比 |
+| `super_large_net_amount` | 超大单净流入额，金额单位为元 |
+| `super_large_net_rate` | 超大单净占比 |
+| `large_net_amount` | 大单净流入额，金额单位为元 |
+| `large_net_rate` | 大单净占比 |
+| `medium_net_amount` | 中单净流入额，金额单位为元 |
+| `medium_net_rate` | 中单净占比 |
+| `small_net_amount` | 小单净流入额，金额单位为元 |
+| `small_net_rate` | 小单净占比 |
+
+金额大于 `0` 表示净流入，小于 `0` 表示净流出。
+
+推荐由 N8N 每个交易日 `09:00` 左右启动，脚本会自己等到 `09:30` 开始采集。SSH command：
+
+```bash
+cd /data/automation/code/personal/quantitative_trading && (pgrep -f "[r]ealtime_moneyflow_snapshots.py.*--loop" >/dev/null || setsid -f .venv/bin/python -u scripts/realtime_moneyflow_snapshots.py --loop --interval 600 --start-at 09:30 --end-at 15:05 --scopes stock,industry,concept --retries 5 --retry-sleep 3 >> logs/realtime_moneyflow_snapshots_$(date +%F).log 2>&1)
+```
+
+如需增加地域板块：
+
+```bash
+cd /data/automation/code/personal/quantitative_trading && (pgrep -f "[r]ealtime_moneyflow_snapshots.py.*--loop" >/dev/null || setsid -f .venv/bin/python -u scripts/realtime_moneyflow_snapshots.py --loop --interval 600 --start-at 09:30 --end-at 15:05 --scopes stock,industry,concept,region --retries 5 --retry-sleep 3 >> logs/realtime_moneyflow_snapshots_$(date +%F).log 2>&1)
+```
+
+查看运行日志：
+
+```bash
+tail -f logs/realtime_moneyflow_snapshots_$(date +%F).log
+```
+
+常用查询：
+
+```sql
+SELECT ts_code, name, main_net_amount, super_large_net_amount, large_net_amount, captured_at
+FROM analytics.realtime_moneyflow_latest
+WHERE scope = 'stock'
+ORDER BY main_net_amount DESC
+LIMIT 20;
+```
+
+```sql
+SELECT scope, code, name, main_net_amount, main_net_rate, captured_at
+FROM analytics.realtime_sector_moneyflow_latest
+ORDER BY main_net_amount DESC
+LIMIT 20;
+```
 
 ### Tushare 原始层
 

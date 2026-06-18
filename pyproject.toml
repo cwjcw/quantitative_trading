@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pandas>=2.2.0",
     "psycopg[binary]>=3.2.0",
+    "requests>=2.31.0",
     "sqlalchemy>=2.0.0",
     "tushare>=1.4.0",
 ]

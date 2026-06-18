@@ -223,9 +223,17 @@ def apply_analysis_views() -> None:
 
 
 def fund_process_running() -> bool:
+    return process_running("scripts/tushare_fund_backfill.py")
+
+
+def fund_portfolio_process_running() -> bool:
+    return process_running("scripts/tushare_fund_portfolio_backfill_periods.py")
+
+
+def process_running(script_name: str) -> bool:
     try:
         result = subprocess.run(
-            ["pgrep", "-af", "scripts/tushare_fund_backfill.py"],
+            ["pgrep", "-af", script_name],
             check=False,
             capture_output=True,
             text=True,
@@ -236,9 +244,102 @@ def fund_process_running() -> bool:
     for line in result.stdout.splitlines():
         if "pgrep -af" in line:
             continue
-        if current_pid not in line and "tushare_fund_backfill.py" in line:
+        if current_pid not in line and script_name in line:
             return True
     return False
+
+
+def fund_portfolio_active_periods(end_date: date) -> list[str]:
+    """Return fund report periods that are likely receiving fresh disclosures."""
+    year = end_date.year
+    periods: list[str] = []
+
+    # Annual reports for the previous fiscal year are commonly disclosed through April,
+    # and late/corrected disclosures can still appear in early May.
+    if date(year, 1, 1) <= end_date <= date(year, 5, 15):
+        periods.append(f"{year - 1}1231")
+
+    # Q1 reports are usually disclosed during April, with a small buffer.
+    if date(year, 4, 1) <= end_date <= date(year, 5, 15):
+        periods.append(f"{year}0331")
+
+    # Semiannual reports are usually disclosed in July-August, with a buffer.
+    if date(year, 7, 1) <= end_date <= date(year, 9, 15):
+        periods.append(f"{year}0630")
+
+    # Q3 reports are usually disclosed in October, with a buffer.
+    if date(year, 10, 1) <= end_date <= date(year, 11, 15):
+        periods.append(f"{year}0930")
+
+    return periods
+
+
+def run_fund_portfolio_collection(
+    mode: str,
+    end_date: date,
+    periods: list[str],
+    sleep_seconds: float,
+    background: bool,
+    log_path: str | None,
+) -> None:
+    if mode == "none":
+        print("MAIN_GET_INFO fund_portfolio_mode=none skip")
+        return
+
+    selected_periods = list(dict.fromkeys(periods))
+    if mode == "active":
+        selected_periods.extend(fund_portfolio_active_periods(end_date))
+        selected_periods = list(dict.fromkeys(selected_periods))
+
+    if not selected_periods:
+        print(f"MAIN_GET_INFO fund_portfolio_mode={mode} periods=0 skip")
+        return
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = repo_root / "scripts" / "tushare_fund_portfolio_backfill_periods.py"
+    if not script_path.exists():
+        raise RuntimeError(f"Fund portfolio backfill script not found: {script_path}")
+
+    command = [
+        sys.executable,
+        "-u",
+        str(script_path),
+        *selected_periods,
+        "--force",
+        "--sleep-seconds",
+        str(sleep_seconds),
+    ]
+
+    if background:
+        if fund_portfolio_process_running():
+            print("MAIN_GET_INFO fund portfolio background skip: existing process is running")
+            return
+        resolved_log_path = (
+            Path(log_path)
+            if log_path
+            else repo_root / "logs" / f"tushare_fund_portfolio_{end_date:%Y-%m-%d}.log"
+        )
+        if not resolved_log_path.is_absolute():
+            resolved_log_path = repo_root / resolved_log_path
+        resolved_log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = resolved_log_path.open("a", encoding="utf-8")
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        print(
+            "MAIN_GET_INFO "
+            f"fund_portfolio_mode={mode} background pid={process.pid} log={resolved_log_path} "
+            f"periods={','.join(selected_periods)}"
+        )
+        return
+
+    print(f"MAIN_GET_INFO fund_portfolio_mode={mode} periods={','.join(selected_periods)}")
+    subprocess.run(command, cwd=repo_root, check=True)
 
 
 def run_fund_collection(
@@ -343,7 +444,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="For fund_nav, skip funds that already have any nav records. Useful for initial long backfills; omit for daily refresh.",
     )
     parser.add_argument("--fund-log-path", default=None, help="Background fund log path. Default: logs/tushare_fund_YYYY-MM-DD.log.")
+    parser.add_argument(
+        "--fund-portfolio-mode",
+        choices=["none", "active"],
+        default="active",
+        help="Collect fund_portfolio report periods. active refreshes periods in current disclosure windows.",
+    )
+    parser.add_argument(
+        "--fund-portfolio-period",
+        action="append",
+        default=None,
+        help="Explicit fund_portfolio report period, e.g. 20260331. Can be repeated or comma-separated.",
+    )
+    parser.add_argument(
+        "--fund-portfolio-foreground",
+        action="store_true",
+        help="Run fund_portfolio collection in the foreground. Default starts it in the background.",
+    )
+    parser.add_argument(
+        "--fund-portfolio-sleep-seconds",
+        type=float,
+        default=0.12,
+        help="Sleep between fund_portfolio API pages.",
+    )
+    parser.add_argument(
+        "--fund-portfolio-log-path",
+        default=None,
+        help="Background fund_portfolio log path. Default: logs/tushare_fund_portfolio_YYYY-MM-DD.log.",
+    )
     return parser
+
+
+def parse_period_args(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    periods: list[str] = []
+    for value in values:
+        for item in value.split(","):
+            period = item.strip()
+            if not period:
+                continue
+            if len(period) != 8 or not period.isdigit():
+                raise ValueError(f"Invalid fund portfolio period: {period}")
+            periods.append(period)
+    return periods
 
 
 def main() -> None:
@@ -381,6 +525,14 @@ def main() -> None:
         background=args.fund_background,
         resume=args.fund_resume,
         log_path=args.fund_log_path,
+    )
+    run_fund_portfolio_collection(
+        mode=args.fund_portfolio_mode,
+        end_date=end_date,
+        periods=parse_period_args(args.fund_portfolio_period),
+        sleep_seconds=args.fund_portfolio_sleep_seconds,
+        background=not args.fund_portfolio_foreground,
+        log_path=args.fund_portfolio_log_path,
     )
     print(f"MAIN_GET_INFO done start={yyyymmdd(start_date)} end={yyyymmdd(end_date)}")
 
