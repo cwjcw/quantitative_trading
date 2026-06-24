@@ -6,10 +6,15 @@ import time
 import uuid
 from datetime import datetime, time as dt_time, timedelta
 from decimal import Decimal, InvalidOperation
+from io import StringIO
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import akshare as ak
+import pandas as pd
+import requests
+from akshare.stock_feature import stock_fund_flow as ak_ths_fund_flow
+from bs4 import BeautifulSoup
 from sqlalchemy import text
 
 from quantitative_trading.config import get_settings
@@ -18,6 +23,8 @@ from quantitative_trading.db import make_engine
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_SCOPES = "stock,industry,concept"
+THS_STOCK_MIN_ROWS = 4500
+THS_REQUEST_TIMEOUT = 15
 
 DDL = """
 CREATE TABLE IF NOT EXISTS public.realtime_moneyflow_runs (
@@ -263,9 +270,135 @@ def stock_ts_code(code: Any) -> str | None:
     return None
 
 
+def ths_headers() -> dict[str, str]:
+    js_code = ak_ths_fund_flow.py_mini_racer.MiniRacer()
+    js_code.eval(ak_ths_fund_flow._get_file_content_ths("ths.js"))
+    return {
+        "Accept": "text/html, */*; q=0.01",
+        "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "hexin-v": js_code.call("v"),
+        "Pragma": "no-cache",
+        "Referer": "https://data.10jqka.com.cn/funds/ggzjl/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+
+def normalize_ths_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = frame.copy()
+    if isinstance(normalized.columns, pd.MultiIndex):
+        normalized.columns = [
+            "-".join(str(part) for part in column if str(part) != "nan").strip("-")
+            for column in normalized.columns
+        ]
+    normalized.columns = [
+        str(column)
+        .strip()
+        .replace("(元)", "")
+        .replace("（元）", "")
+        .replace("资金流入", "流入资金")
+        .replace("资金流出", "流出资金")
+        for column in normalized.columns
+    ]
+    return normalized
+
+
+def parse_ths_stock_page(html: str, page: int) -> pd.DataFrame:
+    try:
+        tables = pd.read_html(StringIO(html))
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError(f"THS stock page {page} has no data table") from exc
+    if not tables:
+        raise RuntimeError(f"THS stock page {page} has no data table")
+    frame = normalize_ths_columns(tables[0])
+    required = {"股票代码", "股票简称", "最新价", "涨跌幅", "净额"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise RuntimeError(
+            f"THS stock page {page} missing columns {missing}; actual={list(frame.columns)}"
+        )
+    return frame
+
+
+def request_ths_stock_page(
+    session: requests.Session,
+    page: int,
+    retries: int,
+    retry_sleep: float,
+) -> tuple[pd.DataFrame, int]:
+    url = (
+        "https://data.10jqka.com.cn/funds/ggzjl/"
+        f"field/zdf/order/desc/page/{page}/ajax/1/"
+    )
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            response = session.get(
+                url,
+                headers=ths_headers(),
+                timeout=THS_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            frame = parse_ths_stock_page(response.text, page)
+            soup = BeautifulSoup(response.text, features="lxml")
+            page_info = soup.find(name="span", attrs={"class": "page_info"})
+            if page_info is None:
+                raise RuntimeError(f"THS stock page {page} is missing page_info")
+            total_pages = int(page_info.text.strip().split("/", 1)[1])
+            return frame, total_pages
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(retry_sleep * (attempt + 1))
+    raise RuntimeError(f"THS stock page {page} failed after retries: {last_error}") from last_error
+
+
+def fetch_ths_stock_full(retries: int, retry_sleep: float) -> pd.DataFrame:
+    session = requests.Session()
+    first_frame, total_pages = request_ths_stock_page(session, 1, retries, retry_sleep)
+    if total_pages < 80:
+        raise RuntimeError(
+            f"THS stock pagination is truncated: total_pages={total_pages}, expected at least 80"
+        )
+
+    frames = [first_frame]
+    for page in range(2, total_pages + 1):
+        frame, reported_total_pages = request_ths_stock_page(
+            session,
+            page,
+            retries,
+            retry_sleep,
+        )
+        if reported_total_pages != total_pages:
+            raise RuntimeError(
+                "THS stock page count changed during collection: "
+                f"page=1 reported {total_pages}, page={page} reported {reported_total_pages}"
+            )
+        frames.append(frame)
+
+    result = pd.concat(frames, ignore_index=True)
+    result["股票代码"] = (
+        result["股票代码"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+    )
+    result = result.drop_duplicates(subset=["股票代码"], keep="first").reset_index(drop=True)
+    if len(result) < THS_STOCK_MIN_ROWS:
+        raise RuntimeError(
+            f"THS stock result is incomplete: unique_rows={len(result)}, "
+            f"minimum={THS_STOCK_MIN_ROWS}, pages={total_pages}"
+        )
+    result.attrs["requested_pages"] = total_pages
+    return result
+
+
 def fetch_scope(scope: str):
     if scope == "stock":
-        return ak.stock_fund_flow_individual(symbol="即时")
+        raise ValueError("stock scope requires fetch_ths_stock_full")
     if scope == "industry":
         return ak.stock_fund_flow_industry(symbol="即时")
     if scope == "concept":
@@ -274,6 +407,8 @@ def fetch_scope(scope: str):
 
 
 def fetch_scope_with_retry(scope: str, retries: int, retry_sleep: float):
+    if scope == "stock":
+        return fetch_ths_stock_full(retries, retry_sleep)
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -459,7 +594,7 @@ def collect_once(engine, scopes: list[str], retries: int, retry_sleep: float) ->
             try:
                 frame = fetch_scope_with_retry(scope, retries, retry_sleep)
                 records = frame.to_dict("records")
-                requested_pages += 1
+                requested_pages += int(frame.attrs.get("requested_pages", 1))
                 returned_rows += len(records)
                 for rank_no, raw in enumerate(records, start=1):
                     if scope == "stock":

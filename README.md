@@ -281,6 +281,11 @@ python scripts/akshare_realtime_moneyflow_snapshots.py --loop
   - `stock`：全市场个股资金流。
   - `industry`：行业板块资金流。
   - `concept`：概念 / 题材板块资金流。
+- 个股维度使用 AkShare 的同花顺认证逻辑直接读取完整分页，不使用上游
+  `free/1` 截断地址；通常可覆盖约 `5100+` 只股票。
+- 个股分页逐页重试并校验页数、必需字段、代码去重和最小行数。若返回少于
+  `4500` 只或分页中途变化，该轮个股数据会标记失败且不会写入残缺快照，
+  查询视图继续保留上一轮完整结果。
 - `09:30` 开始抓取。
 - 每 `600` 秒抓取一次。
 - `11:35-12:59` 之间暂停抓取，`13:00` 自动恢复。
@@ -317,7 +322,7 @@ python scripts/akshare_realtime_moneyflow_snapshots.py --loop
 推荐由 N8N 每个交易日 `09:00` 左右启动，脚本会自己等到 `09:30` 开始采集。SSH command：
 
 ```bash
-cd /data/automation/code/personal/quantitative_trading && mkdir -p logs && log=logs/akshare_realtime_moneyflow_snapshots_$(date +%F).log && echo "$(date '+%F %T %z') launch akshare realtime_moneyflow" >> "$log" && flock -n /tmp/akshare_realtime_moneyflow_snapshots.lock nohup env TQDM_DISABLE=1 .venv/bin/python -u scripts/akshare_realtime_moneyflow_snapshots.py --loop --interval 600 --start-at 09:30 --end-at 15:05 --scopes stock,industry,concept --retries 2 --retry-sleep 3 >> "$log" 2>&1 < /dev/null &
+cd /data/automation/code/personal/quantitative_trading && mkdir -p logs && log="$PWD/logs/akshare_realtime_moneyflow_snapshots_$(date +%F).log" && echo "$(date '+%F %T %z') launch akshare realtime_moneyflow" >> "$log" && setsid -f flock -n /tmp/akshare_realtime_moneyflow_snapshots.lock /usr/bin/env TQDM_DISABLE=1 "$PWD/.venv/bin/python" -u "$PWD/scripts/akshare_realtime_moneyflow_snapshots.py" --loop --interval 600 --start-at 09:30 --end-at 15:05 --scopes stock,industry,concept --retries 2 --retry-sleep 3 >> "$log" 2>&1 < /dev/null
 ```
 
 查看运行日志：
