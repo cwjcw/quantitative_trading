@@ -7,12 +7,13 @@ A 股量化交易研究仓库。当前项目以 PostgreSQL 为中心，把本地
 - QMT 负责标准 5 分钟 K 线和股票合约信息。
 - Tushare 负责实时快照，以及非交易类、交易决策强相关的外生数据，例如日频资金流、每日指标、筹码分布、涨跌停、龙虎榜、融资融券、沪深股通、板块概念、公告研报、风险事件和基本面。
 - AkShare 负责盘中实时资金流快照，当前使用同花顺资金流接口写入统一实时资金流表。
+- 外部账户同步脚本负责实时更新账户资金和持仓当前状态，并把每次变化追加到审计日志。
 - 所有 Tushare 数据先进入通用原始层，完整保留 `raw jsonb`，再按研究需求映射到 `analytics` schema 下的分析视图。
 - 采集任务必须可重跑、可去重、可补采、可追踪失败原因。
 
 ## 当前状态
 
-截至 2026-06-05，已经完成：
+截至 2026-06-24，已经完成：
 
 - PostgreSQL 配置改为从 `.env` / 环境变量读取，不再在代码里硬编码数据库连接。
 - 新增通用 Tushare 原始数据表：
@@ -35,6 +36,10 @@ A 股量化交易研究仓库。当前项目以 PostgreSQL 为中心，把本地
   - 默认 `09:30` 开始、`11:35-12:59` 暂停、`15:05` 结束
   - 写入 `public.realtime_moneyflow_runs`、`public.realtime_moneyflow_snapshots`
   - 提供 `analytics.realtime_moneyflow_latest`、`analytics.realtime_sector_moneyflow_latest`、`analytics.realtime_dc_member_moneyflow_latest`
+- 新增账户资金和持仓快照表：
+  - `public.portfolio_asset`：每个账户最新一条资金快照
+  - `public.portfolio_positions`：每个账户、每只股票最新一条持仓快照
+  - `public.portfolio_changes`：资金和持仓变化的 append-only 审计日志
 - 新增分析视图：
   - `analytics.tushare_daily_basic`
   - `analytics.tushare_moneyflow_stock`
@@ -71,12 +76,21 @@ A 股量化交易研究仓库。当前项目以 PostgreSQL 为中心，把本地
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
+├── config/
+│   └── watchlist.json
 ├── docs/
+│   ├── database_overview.md
+│   ├── database_objects/
+│   │   └── README.md
 │   ├── tushare_data_architecture.md
-│   └── tushare_backfill_report.md
+│   ├── tushare_backfill_report.md
+│   └── tushare_fund_data.md
 ├── scripts/
+│   ├── akshare_realtime_moneyflow_snapshots.py
 │   ├── tushare_backfill.py
-│   └── tushare_financial_backfill.py
+│   ├── tushare_financial_backfill.py
+│   ├── tushare_fund_backfill.py
+│   └── tushare_stock_snapshots.py
 ├── sql/
 │   └── analysis_views.sql
 └── src/
@@ -175,6 +189,38 @@ DB_NAME=smart_stock
 DB_USER=smart_stock
 DB_PASSWORD=your_password
 ```
+
+## 关注股票
+
+关注列表保存在 [`config/watchlist.json`](config/watchlist.json)。查询股票数据库或
+请求分析关注股时，如果没有在请求中另行指定股票，默认读取其中
+`enabled = true` 的记录。
+
+```json
+{
+  "stocks": [
+    {
+      "stock_code": "600276.SH",
+      "stock_name": "恒瑞医药",
+      "enabled": true,
+      "tags": ["创新药", "化学制药"],
+      "note": ""
+    }
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+| --- | --- |
+| `stock_code` | 带交易所后缀的标准股票代码，例如 `600276.SH` |
+| `stock_name` | 股票名称，用于展示和人工核对 |
+| `enabled` | 是否纳入默认查询；临时停用时改为 `false` |
+| `tags` | 自定义行业、概念或策略标签 |
+| `note` | 自定义备注，可留空 |
+
+请求中明确给出股票列表时，以本次请求为准，不自动合并关注列表。
 
 读取优先级：
 
@@ -347,6 +393,111 @@ FROM analytics.realtime_sector_moneyflow_latest
 ORDER BY main_net_amount DESC
 LIMIT 20;
 ```
+
+### 账户与持仓层
+
+账户同步脚本维护两张当前状态表和一张历史审计表：
+
+| 表 | 说明 |
+| --- | --- |
+| `public.portfolio_asset` | 每个账户最新一条资金快照，主键为 `account_id` |
+| `public.portfolio_positions` | 每个账户、每只股票最新一条持仓快照，联合主键为 `account_id, stock_code` |
+| `public.portfolio_changes` | append-only 变更审计日志，记录资金或持仓的新增、更新和删除 |
+
+`portfolio_asset` 和 `portfolio_positions` 只表示当前状态。同步脚本使用
+`content_hash` 判断内容是否变化；需要资金曲线、历史持仓或变更回溯时，应读取
+`portfolio_changes`，不要把当前状态表当作时间序列表。
+
+#### `portfolio_asset`
+
+| 字段 | 含义 |
+| --- | --- |
+| `account_id` | 账户编号，主键 |
+| `cash` | 可用资金 |
+| `frozen_cash` | 冻结资金 |
+| `market_value` | 持仓市值 |
+| `total_asset` | 总资产，业务口径为 `cash + market_value` |
+| `content_hash` | 当前快照内容的 SHA256，用于去重和变更检测 |
+| `fetched_at` | 快照抓取时间 |
+
+#### `portfolio_positions`
+
+| 字段 | 含义 |
+| --- | --- |
+| `account_id` | 账户编号，联合主键之一 |
+| `stock_code` | 股票代码，例如 `600519.SH`，联合主键之一 |
+| `stock_name` | 股票名称 |
+| `volume` | 持仓数量 |
+| `can_use_volume` | 当前可卖数量 |
+| `open_price` | 开仓成本 |
+| `avg_price` | 持仓均价 |
+| `market_value` | 持仓市值 |
+| `frozen_volume` | 冻结数量 |
+| `on_road_volume` | 在途数量 |
+| `yesterday_volume` | 昨日持仓数量 |
+| `content_hash` | 当前快照内容的 SHA256 |
+| `fetched_at` | 快照抓取时间 |
+
+索引 `idx_portfolio_positions_account` 为
+`(account_id, fetched_at DESC)`，用于按账户读取最新持仓快照。
+
+#### `portfolio_changes`
+
+| 字段 | 含义 |
+| --- | --- |
+| `change_id` | 自增主键 |
+| `account_id` | 账户编号 |
+| `kind` | `asset` 或 `position` |
+| `stock_code` | 股票代码；资金变更时为空 |
+| `change_type` | `insert`、`update` 或 `delete` |
+| `old_hash` | 变更前内容 hash |
+| `new_hash` | 变更后内容 hash |
+| `snapshot` | 本次变更对应的完整 JSON 快照 |
+| `detected_at` | 变更写入时间，默认 `NOW()` |
+
+索引 `idx_portfolio_changes_account_time` 为
+`(account_id, detected_at DESC)`。该表是账户和持仓历史分析的主要入口。
+
+常用查询：
+
+```sql
+-- 当前资金
+SELECT *
+FROM public.portfolio_asset
+WHERE account_id = 'your_account';
+```
+
+```sql
+-- 当前持仓
+SELECT *
+FROM public.portfolio_positions
+WHERE account_id = 'your_account'
+ORDER BY market_value DESC;
+```
+
+```sql
+-- 指定股票的持仓历史
+SELECT detected_at, change_type, snapshot
+FROM public.portfolio_changes
+WHERE account_id = 'your_account'
+  AND stock_code = '600519.SH'
+  AND kind = 'position'
+ORDER BY detected_at DESC;
+```
+
+```sql
+-- 资金曲线
+SELECT
+    detected_at,
+    (snapshot->>'total_asset')::numeric AS total_asset
+FROM public.portfolio_changes
+WHERE account_id = 'your_account'
+  AND kind = 'asset'
+ORDER BY detected_at;
+```
+
+逐表字段和索引说明见
+[docs/database_objects/README.md](docs/database_objects/README.md)。
 
 ### Tushare 原始层
 

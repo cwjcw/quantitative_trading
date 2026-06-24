@@ -1,0 +1,39 @@
+{
+  "stocks": [
+    {
+      "stock_code": "300308.SZ",
+      "stock_name": "中际旭创",
+      "enabled": true,
+      "tags": ["CPO", "光模块"],
+      "note": ""
+    },
+    {
+      "stock_code": "300806.SZ",
+      "stock_name": "斯迪克",
+      "enabled": true,
+      "tags": ["电子材料"],
+      "note": ""
+    },
+    {
+      "stock_code": "002938.SZ",
+      "stock_name": "鹏鼎控股",
+      "enabled": true,
+      "tags": ["PCB", "消费电子"],
+      "note": ""
+    },
+    {
+      "stock_code": "600276.SH",
+      "stock_name": "恒瑞医药",
+      "enabled": true,
+      "tags": ["创新药", "化学制药"],
+      "note": ""
+    },
+    {
+      "stock_code": "600246.SH",
+      "stock_name": "万通发展",
+      "enabled": true,
+      "tags": ["房地产", "通信技术"],
+      "note": ""
+    }
+  ]
+}

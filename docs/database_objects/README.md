@@ -20,6 +20,9 @@
 | `analytics` | [tushare_sector_moneyflow_dc](analytics.tushare_sector_moneyflow_dc.md) | `VIEW` | 东方财富行业/概念板块资金流视图，支持板块轮动和强势板块筛选。 |
 | `analytics` | [tushare_stock_events](analytics.tushare_stock_events.md) | `VIEW` | 股票事件统一视图，整合 ST、停复牌、解禁、质押、股东变动、回购、公告、研报等事件。 |
 | `analytics` | [tushare_stock_feature_daily](analytics.tushare_stock_feature_daily.md) | `VIEW` | 个股日频特征宽表，整合日线价格、估值、资金流和筹码指标，供选股模型直接使用。 |
+| `public` | [portfolio_asset](public.portfolio_asset.md) | `BASE TABLE` | 每个账户最新一条资金快照，保存现金、持仓市值和总资产。 |
+| `public` | [portfolio_changes](public.portfolio_changes.md) | `BASE TABLE` | 账户资金和持仓的 append-only 变更审计日志，是历史曲线和持仓变化的主要入口。 |
+| `public` | [portfolio_positions](public.portfolio_positions.md) | `BASE TABLE` | 每个账户、每只股票最新一条持仓快照，保存数量、成本、可卖数量和市值。 |
 | `public` | [stock_5m_bars](public.stock_5m_bars.md) | `BASE TABLE` | QMT 标准 5 分钟行情表，保存股票分钟级 OHLCV，是日内特征和回测的核心行情源。 |
 | `public` | [stock_instruments](public.stock_instruments.md) | `BASE TABLE` | 本地股票合约/基础信息表，是本地可交易股票池的重要来源。 |
 | `public` | [stock_snapshots](public.stock_snapshots.md) | `BASE TABLE` | QMT 实时快照表，保存采集时点的盘口/价格/成交等实时状态。 |
