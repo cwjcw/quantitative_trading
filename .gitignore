@@ -13,3 +13,5 @@ cache/
 *.tmp
 venv/
 tmp/
+frontend/node_modules/
+frontend/dist/

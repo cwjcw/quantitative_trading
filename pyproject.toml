@@ -16,6 +16,7 @@ qt-tushare-raw = "quantitative_trading.tushare.collect_raw:main"
 qt-tushare-financials = "quantitative_trading.tushare.collect_financials:main"
 qt-apply-analysis-views = "quantitative_trading.analysis.apply_views:main"
 main_get_info = "quantitative_trading.main_get_info:main"
+qt-web-api = "quantitative_trading.web_api:main"
 
 [build-system]
 requires = ["hatchling"]
