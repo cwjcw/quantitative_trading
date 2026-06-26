@@ -34,6 +34,27 @@
       "enabled": true,
       "tags": ["房地产", "通信技术"],
       "note": ""
+    },
+    {
+      "stock_code": "601138.SH",
+      "stock_name": "工业富联",
+      "enabled": true,
+      "tags": ["AI服务器", "算力", "电子制造"],
+      "note": ""
+    },
+    {
+      "stock_code": "002902.SZ",
+      "stock_name": "铭普光磁",
+      "enabled": true,
+      "tags": ["光通信", "磁性元件"],
+      "note": ""
+    },
+    {
+      "stock_code": "600641.SH",
+      "stock_name": "先导基电",
+      "enabled": true,
+      "tags": ["半导体", "主板"],
+      "note": ""
     }
   ]
 }
